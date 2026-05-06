@@ -13,7 +13,9 @@ ReviewStatus = Literal["auto_accepted", "needs_review", "reviewed_accepted", "re
 @dataclass
 class OrganizedLiDARFrame:
     frame_id: str
+    # pcd in range image format, shape (H, W, C) where C >= 3 (x, y, z, [intensity, ...])
     points_range: "object"
+    # pcd in flat format, shape (N, C) where C >= 3 (x, y, z, [intensity, ...])
     points_flat: "object"
 
 
@@ -26,8 +28,11 @@ class SequenceSample:
 
 @dataclass
 class Box3D:
+    # tx, ty, tz in LiDAR coordinate
     center: list[float]
+    # h, w, l in LiDAR coordinate
     size: list[float]
+    # rotation around z-axis in radians, in LiDAR coordinate
     yaw: float
     box_type: str = "adaptive_obb"
 
