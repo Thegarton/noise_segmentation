@@ -1,0 +1,6 @@
+fixed_actor_sizes:
+  TRUCK_BUS: [10.0, 2.6, 3.2]
+  CAR: [4.2, 1.8, 1.6]
+  CYCLIST: [1.8, 0.7, 1.7]
+  MOTORCYCLE: [2.1, 0.8, 1.5]
+  PEDESTRIAN: [0.7, 0.7, 1.75]
