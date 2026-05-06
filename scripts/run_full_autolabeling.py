@@ -2,10 +2,17 @@
 import argparse
 from pathlib import Path
 
+<<<<<<< codex/build-offline-auto-labeling-system-wl2yjl
 from autolabeler.data.schemas import SequenceSample, AutoLabelingResult
 from autolabeler.data.dataset_indexer import build_dataset_index
 from autolabeler.data.sequence_builder import build_temporal_windows
 from autolabeler.data.frame_loader import load_frame
+=======
+from autolabeler.data.bin_loader import load_bin
+from autolabeler.data.schemas import SequenceSample, AutoLabelingResult
+from autolabeler.data.dataset_indexer import build_dataset_index
+from autolabeler.data.sequence_builder import build_temporal_windows
+>>>>>>> main
 from autolabeler.actors.actor_autolabeler import ActorAutoLabeler
 from autolabeler.irregular.irregular_autolabeler import IrregularAutoLabeler
 from autolabeler.noise.noise_autolabeler import NoiseAutoLabeler
@@ -21,11 +28,17 @@ def main() -> None:
     p.add_argument("--input-dir", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--snapshot", default="./out/pseudo_label_db_v0_1.json")
+<<<<<<< codex/build-offline-auto-labeling-system-wl2yjl
     p.add_argument("--input-format", choices=["auto", "bin", "csv"], default="auto")
     p.add_argument("--cache-bin-dir", default=None)
     args = p.parse_args()
 
     index = build_dataset_index(args.input_dir, input_format=args.input_format)
+=======
+    args = p.parse_args()
+
+    index = build_dataset_index(args.input_dir)
+>>>>>>> main
     windows = build_temporal_windows(index, k_past=2, k_future=2)
 
     actor = ActorAutoLabeler()
@@ -35,9 +48,15 @@ def main() -> None:
     results = []
     all_labels = []
     for w in windows:
+<<<<<<< codex/build-offline-auto-labeling-system-wl2yjl
         cur = load_frame(w["current"].lidar_path, w["current"].frame_id, input_format=args.input_format, cache_bin_dir=args.cache_bin_dir)
         past = [load_frame(r.lidar_path, r.frame_id, input_format=args.input_format, cache_bin_dir=args.cache_bin_dir) for r in w["past"]]
         future = [load_frame(r.lidar_path, r.frame_id, input_format=args.input_format, cache_bin_dir=args.cache_bin_dir) for r in w["future"]]
+=======
+        cur = load_bin(w["current"].lidar_path, w["current"].frame_id)
+        past = [load_bin(r.lidar_path, r.frame_id) for r in w["past"]]
+        future = [load_bin(r.lidar_path, r.frame_id) for r in w["future"]]
+>>>>>>> main
         sample = SequenceSample(current=cur, past=past, future=future)
 
         actor_labels = actor.run(sample)

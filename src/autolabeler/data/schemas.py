@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
+<<<<<<< codex/build-offline-auto-labeling-system-wl2yjl
 from typing import Optional, Literal, Any
+=======
+from typing import Optional, Literal
+>>>>>>> main
 
 Provenance = Literal[
     "manual", "camera_teacher", "lidar_teacher", "temporal_propagated", "rule_labeled",
@@ -13,6 +17,7 @@ ReviewStatus = Literal["auto_accepted", "needs_review", "reviewed_accepted", "re
 @dataclass
 class OrganizedLiDARFrame:
     frame_id: str
+<<<<<<< codex/build-offline-auto-labeling-system-wl2yjl
     points_range: Any
     points_flat: Any
     timestamp_s: Optional[int] = None
@@ -20,6 +25,12 @@ class OrganizedLiDARFrame:
     timestamp_us: Optional[int] = None
     background_light_intensity: Optional[float] = None
     meta: dict[str, Any] = field(default_factory=dict)
+=======
+    # pcd in range image format, shape (H, W, C) where C >= 3 (x, y, z, [intensity, ...])
+    points_range: "object"
+    # pcd in flat format, shape (N, C) where C >= 3 (x, y, z, [intensity, ...])
+    points_flat: "object"
+>>>>>>> main
 
 
 @dataclass
@@ -31,8 +42,16 @@ class SequenceSample:
 
 @dataclass
 class Box3D:
+<<<<<<< codex/build-offline-auto-labeling-system-wl2yjl
     center: list[float]
     size: list[float]
+=======
+    # tx, ty, tz in LiDAR coordinate
+    center: list[float]
+    # h, w, l in LiDAR coordinate
+    size: list[float]
+    # rotation around z-axis in radians, in LiDAR coordinate
+>>>>>>> main
     yaw: float
     box_type: str = "adaptive_obb"
 
