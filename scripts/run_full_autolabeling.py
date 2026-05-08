@@ -46,7 +46,8 @@ def main() -> None:
 
         actor_labels = actor.run(sample)
         actor_labels = manual_by_frame.get(cur.frame_id, []) + actor_labels
-        masks = build_masks(len(cur.points_flat), [], [])
+        actor_indices = sorted({i for label in actor_labels for i in label.point_indices})
+        masks = build_masks(len(cur.points_flat), actor_indices, [])
         irr_labels = irr.run(sample, masks["removed_by_actor"])
         noise_labels = noise.run(sample, masks["unexplained_residual"])
         final_labels = arbitrate(actor_labels + irr_labels + noise_labels)
