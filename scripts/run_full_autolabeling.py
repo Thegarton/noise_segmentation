@@ -19,20 +19,28 @@ from autolabeler.data.kitti_mask_loader import build_manual_actor_labels
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Offline v0.1 preprocessing and label preparation")
-    p.add_argument("--input-dir", required=True)
+    p.add_argument("--input-dir", default="./data")
     p.add_argument("--output", required=True)
     p.add_argument("--snapshot", default="./out/pseudo_label_db_v0_1.json")
     p.add_argument("--input-format", choices=["auto", "bin", "csv"], default="auto")
     p.add_argument("--cache-bin-dir", default=None)
     p.add_argument("--mask-dir", default=None, help="Path to dataset/mask with frame_list.txt and tracklet_labels.xml")
+    p.add_argument("--openpcdet-predictions", default=None, help="JSONL predictions produced by scripts/run_openpcdet_teacher.py")
     args = p.parse_args()
 
     index = build_dataset_index(args.input_dir, input_format=args.input_format)
     windows = build_temporal_windows(index, k_past=2, k_future=2)
 
-    manual_by_frame = build_manual_actor_labels(args.mask_dir) if args.mask_dir else {}
+    mask_dir = args.mask_dir
+    default_mask_dir = Path(args.input_dir) / "mask"
+    if mask_dir is None and default_mask_dir.exists():
+        mask_dir = str(default_mask_dir)
+    manual_by_frame = build_manual_actor_labels(mask_dir) if mask_dir else {}
 
-    actor = ActorAutoLabeler()
+    actor = ActorAutoLabeler(
+        openpcdet_predictions_path=args.openpcdet_predictions,
+        pseudo_label_version="v0.2_openpcdet_teacher" if args.openpcdet_predictions else "v0_actor_heuristic",
+    )
     irr = IrregularAutoLabeler()
     noise = NoiseAutoLabeler()
 

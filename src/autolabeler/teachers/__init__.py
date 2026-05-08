@@ -1,0 +1,1 @@
+"""Optional teacher model adapters."""
