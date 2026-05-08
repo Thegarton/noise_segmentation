@@ -14,6 +14,7 @@ from autolabeler.fusion.arbiter import arbitrate
 from autolabeler.export.jsonl_exporter import export_jsonl
 from autolabeler.review.review_queue import build_review_queue
 from autolabeler.database.label_db import write_versioned_snapshot
+from autolabeler.data.kitti_mask_loader import build_manual_actor_labels
 
 
 def main() -> None:
@@ -23,10 +24,13 @@ def main() -> None:
     p.add_argument("--snapshot", default="./out/pseudo_label_db_v0_1.json")
     p.add_argument("--input-format", choices=["auto", "bin", "csv"], default="auto")
     p.add_argument("--cache-bin-dir", default=None)
+    p.add_argument("--mask-dir", default=None, help="Path to dataset/mask with frame_list.txt and tracklet_labels.xml")
     args = p.parse_args()
 
     index = build_dataset_index(args.input_dir, input_format=args.input_format)
     windows = build_temporal_windows(index, k_past=2, k_future=2)
+
+    manual_by_frame = build_manual_actor_labels(args.mask_dir) if args.mask_dir else {}
 
     actor = ActorAutoLabeler()
     irr = IrregularAutoLabeler()
@@ -41,6 +45,7 @@ def main() -> None:
         sample = SequenceSample(current=cur, past=past, future=future)
 
         actor_labels = actor.run(sample)
+        actor_labels = manual_by_frame.get(cur.frame_id, []) + actor_labels
         masks = build_masks(len(cur.points_flat), [], [])
         irr_labels = irr.run(sample, masks["removed_by_actor"])
         noise_labels = noise.run(sample, masks["unexplained_residual"])
