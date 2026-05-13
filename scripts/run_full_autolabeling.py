@@ -28,6 +28,7 @@ def main() -> None:
     p.add_argument("--mask-dir", default=None, help="Path to dataset/mask with frame_list.txt and tracklet_labels.xml")
     p.add_argument("--noise-mask-dir", default=None, help="Path to KITTI XML manual noise masks with frame_list.txt and tracklet_labels.xml")
     p.add_argument("--openpcdet-predictions", default=None, help="JSONL predictions produced by scripts/run_openpcdet_teacher.py")
+    p.add_argument("--use-actor-heuristic", action="store_true", help="Also run the range-view heuristic actor fallback")
     p.add_argument("--kitti-output-dir", default=None, help="Optional output dir for KITTI XML export of final boxed labels")
     args = p.parse_args()
 
@@ -44,6 +45,10 @@ def main() -> None:
     actor = ActorAutoLabeler(
         openpcdet_predictions_path=args.openpcdet_predictions,
         pseudo_label_version="v0.2_openpcdet_teacher" if args.openpcdet_predictions else "v0_actor_heuristic",
+        use_heuristic_fallback=should_use_actor_heuristic(
+            openpcdet_predictions=args.openpcdet_predictions,
+            use_actor_heuristic=args.use_actor_heuristic,
+        ),
     )
     irr = IrregularAutoLabeler()
     noise = NoiseAutoLabeler()
@@ -84,6 +89,10 @@ def main() -> None:
     review_items = build_review_queue(all_labels)
     write_versioned_snapshot(args.snapshot, [x.to_jsonable() for x in results], version="v0.1.0")
     print(f"exported_frames={len(results)} review_items={len(review_items)}")
+
+
+def should_use_actor_heuristic(*, openpcdet_predictions: str | None, use_actor_heuristic: bool) -> bool:
+    return use_actor_heuristic or openpcdet_predictions is None
 
 
 if __name__ == "__main__":
