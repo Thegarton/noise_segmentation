@@ -118,7 +118,7 @@ def test_teacher_predictions_export_to_kitti_tracklets_and_confidence_log(tmp_pa
     assert label.semantic_class == "CAR"
     assert label.box_3d is not None
     assert label.box_3d.center == [10.0, 2.0, 0.3]
-    assert label.box_3d.size == [4.2, 1.8, 1.6]
+    assert label.box_3d.size == [1.8, 1.6, 4.2]
 
     log_text = (out_dir / "detection_confidence_log.csv").read_text(encoding="utf-8")
     assert "frame_000,1,1,car,0.91,0.91,0.91" in log_text

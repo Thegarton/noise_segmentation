@@ -136,7 +136,7 @@ class ActorAutoLabeler:
         total = 0
         center = np.asarray(proposal.center[:2], dtype=np.float32)
         size = self.fixed_sizes[proposal.semantic_class]
-        gate = max(1.5, 0.45 * size[0])
+        gate = max(1.5, 0.45 * size[2])
 
         for branch in ("past", "future"):
             for proposals in temporal_proposals[branch]:
@@ -159,7 +159,7 @@ class ActorAutoLabeler:
         total = 0
         center = np.asarray(prediction.center[:2], dtype=np.float32)
         size = self.fixed_sizes[prediction.semantic_class]
-        gate = max(1.5, 0.45 * size[0])
+        gate = max(1.5, 0.45 * size[2])
 
         for frames in (sample.past[-2:], sample.future[:2]):
             for frame in frames:
@@ -191,7 +191,7 @@ class ActorAutoLabeler:
             duplicate = False
             for prev in kept:
                 prev_center = np.asarray(prev["center"][:2], dtype=np.float32)
-                gate = max(0.75, 0.35 * min(size[0], self.fixed_sizes[prev["semantic_class"]][0]))
+                gate = max(0.75, 0.35 * min(size[2], self.fixed_sizes[prev["semantic_class"]][2]))
                 if float(np.linalg.norm(center - prev_center)) < gate:
                     duplicate = True
                     break

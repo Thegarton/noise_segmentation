@@ -18,7 +18,7 @@ def test_build_manual_actor_labels(tmp_path: Path):
     <item_version>1</item_version>
     <item>
       <objectType>car</objectType>
-      <h>1.6</h><w>1.8</w><l>4.2</l>
+      <h>1.8</h><w>4.2</w><l>1.6</l>
       <first_frame>1</first_frame>
       <poses><count>1</count><item_version>0</item_version>
         <item><tx>10.0</tx><ty>2.0</ty><tz>0.3</tz><rz>0.1</rz></item>
@@ -50,7 +50,7 @@ def test_manual_actor_labels_are_densified_from_box_masks(tmp_path: Path):
     <item_version>1</item_version>
     <item>
       <objectType>car</objectType>
-      <h>1.6</h><w>1.8</w><l>4.2</l>
+      <h>1.8</h><w>4.2</w><l>1.6</l>
       <first_frame>0</first_frame>
       <poses><count>1</count><item_version>0</item_version>
         <item><tx>10.0</tx><ty>2.0</ty><tz>0.3</tz><rz>0.0</rz></item>
@@ -106,4 +106,5 @@ def test_manual_noise_labels_are_read_from_kitti_xml_and_densified(tmp_path: Pat
     assert labels[0].branch_name == "noise"
     assert labels[0].box_3d is not None
     assert labels[0].box_3d.box_type == "manual_noise_box"
+    assert labels[0].box_3d.size == [2.0, 1.0, 3.0]
     assert labels[0].point_indices == [W + 2]

@@ -83,7 +83,7 @@ def export_openpcdet_records_as_kitti_xml(
                     range_image_indices=[],
                     box_3d=Box3D(
                         center=[float(x) for x in box["center"]],
-                        size=[float(x) for x in box["size"]],
+                        size=_teacher_size_to_whl([float(x) for x in box["size"]]),
                         yaw=float(box["yaw"]),
                         box_type="fixed_actor",
                     ),
@@ -133,9 +133,9 @@ def _single_pose_tracklet(row: _PoseRow) -> ET.Element:
 
     item = ET.Element("item", {"version": "1", "tracking_level": "0", "class_id": "1"})
     _text(item, "objectType", _object_type(label.semantic_class))
-    _text(item, "h", _fmt(box.size[2]))
-    _text(item, "w", _fmt(box.size[1]))
-    _text(item, "l", _fmt(box.size[0]))
+    _text(item, "h", _fmt(box.size[1]))
+    _text(item, "w", _fmt(box.size[0]))
+    _text(item, "l", _fmt(box.size[2]))
     _text(item, "first_frame", str(row.frame_index))
     poses = ET.SubElement(item, "poses", {"version": "0", "tracking_level": "0", "class_id": "2"})
     _text(poses, "count", "1")
@@ -223,6 +223,11 @@ def _teacher_class_to_semantic(class_name: str) -> str:
         "cyclist": "CYCLIST",
     }
     return mapping.get(class_name.strip().lower(), class_name.strip().upper())
+
+
+def _teacher_size_to_whl(size_lwh: list[float]) -> list[float]:
+    length, width, height = size_lwh
+    return [float(width), float(height), float(length)]
 
 
 def _text(parent: ET.Element, tag: str, value: str, *, index: int | None = None) -> ET.Element:

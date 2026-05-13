@@ -1,3 +1,5 @@
+# Fixed actor sizes are stored as [W, H, L] in this config.
+# Runtime Box3D.size keeps the same [W, H, L] order.
 fixed_actor_sizes:
   TRUCK_BUS: [10.0, 2.6, 3.2]
   CAR: [4.2, 1.8, 1.6]

@@ -113,11 +113,12 @@ class RangePillarCenterPointLite:
             return []
 
         fixed_size = self.fixed_actor_sizes[semantic_class]
-        z_center = float(np.min(pts[:, 2]) + fixed_size[2] * 0.5)
+        fixed_size_lwh = [fixed_size[2], fixed_size[0], fixed_size[1]]
+        z_center = float(np.min(pts[:, 2]) + fixed_size[1] * 0.5)
         center = [float(np.mean(pts[:, 0])), float(np.mean(pts[:, 1])), z_center]
 
         density_score = min(1.0, math.log1p(pts.shape[0]) / math.log1p(180.0))
-        compactness = _compactness_score(observed_size, fixed_size)
+        compactness = _compactness_score(observed_size, fixed_size_lwh)
         range_score = 1.0 - min(0.45, float(np.mean(ranges[coords[:, 0], coords[:, 1]])) / 250.0)
         confidence = float(np.clip(0.45 * class_score + 0.25 * density_score + 0.2 * compactness + 0.1 * range_score, 0.0, 1.0))
         if confidence < 0.28:
@@ -162,7 +163,7 @@ class RangePillarCenterPointLite:
             duplicate = False
             for prev in kept:
                 prev_center = np.asarray(prev.center[:2], dtype=np.float32)
-                gate = 0.35 * min(self.fixed_actor_sizes[prop.semantic_class][0], self.fixed_actor_sizes[prev.semantic_class][0])
+                gate = 0.35 * min(self.fixed_actor_sizes[prop.semantic_class][2], self.fixed_actor_sizes[prev.semantic_class][2])
                 if float(np.linalg.norm(center - prev_center)) < max(0.75, gate):
                     duplicate = True
                     break

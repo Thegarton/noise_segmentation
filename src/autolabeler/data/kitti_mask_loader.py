@@ -143,7 +143,7 @@ def build_manual_labels(mask_dir: str, *, branch_name: str) -> dict[str, list[La
                 track_id=tr.track_id,
                 point_indices=[],
                 range_image_indices=[],
-                box_3d=Box3D(center=[pose.tx, pose.ty, pose.tz], size=[tr.l, tr.w, tr.h], yaw=pose.rz, box_type=box_type),
+                box_3d=Box3D(center=[pose.tx, pose.ty, pose.tz], size=[tr.w, tr.h, tr.l], yaw=pose.rz, box_type=box_type),
                 mask_confidence=1.0,
                 class_confidence=1.0,
                 box_confidence=1.0,

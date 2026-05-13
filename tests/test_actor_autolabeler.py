@@ -1,6 +1,7 @@
 import numpy as np
 
 from autolabeler.actors.actor_autolabeler import ActorAutoLabeler
+from autolabeler.actors.fixed_box_decoder import load_fixed_actor_sizes
 from autolabeler.data.bin_loader import H, W, C
 from autolabeler.data.schemas import OrganizedLiDARFrame, SequenceSample
 
@@ -39,3 +40,17 @@ def test_actor_autolabeler_detects_fixed_size_car():
     assert len(label.point_indices) > 0
     assert len(label.range_image_indices) == len(label.point_indices)
     assert label.track_id == 1
+
+
+def test_fixed_actor_sizes_are_loaded_from_config_as_whl(tmp_path):
+    config = tmp_path / "classes.yaml"
+    config.write_text(
+        """fixed_actor_sizes:
+  CAR: [1.8, 1.6, 4.2]
+""",
+        encoding="utf-8",
+    )
+
+    sizes = load_fixed_actor_sizes(str(config))
+
+    assert sizes["CAR"] == [1.8, 1.6, 4.2]

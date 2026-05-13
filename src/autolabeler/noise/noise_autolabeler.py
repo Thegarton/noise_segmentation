@@ -150,7 +150,8 @@ class NoiseAutoLabeler:
         mins = np.min(pts, axis=0)
         maxs = np.max(pts, axis=0)
         center = ((mins + maxs) * 0.5).astype(float).tolist()
-        size = np.maximum(maxs - mins, np.asarray([0.05, 0.05, 0.05], dtype=np.float32)).astype(float).tolist()
+        xyz_size = np.maximum(maxs - mins, np.asarray([0.05, 0.05, 0.05], dtype=np.float32))
+        size = [float(xyz_size[1]), float(xyz_size[2]), float(xyz_size[0])]
         return Box3D(center=center, size=size, yaw=0.0, box_type="noise_adaptive_aabb")
 
     def _box_confidence(self, component: NoiseComponent) -> float:

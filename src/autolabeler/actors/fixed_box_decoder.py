@@ -5,7 +5,7 @@ from pathlib import Path
 from ..data.schemas import Box3D
 
 
-DEFAULT_FIXED_ACTOR_SIZES: dict[str, list[float]] = {
+DEFAULT_FIXED_ACTOR_SIZES_WHL: dict[str, list[float]] = {
     "TRUCK_BUS": [10.0, 2.6, 3.2],
     "CAR": [4.2, 1.8, 1.6],
     "CYCLIST": [1.8, 0.7, 1.7],
@@ -20,7 +20,7 @@ def load_fixed_actor_sizes(config_path: str | None = None) -> dict[str, list[flo
 
     path = Path(config_path)
     if not path.exists():
-        return {k: v[:] for k, v in DEFAULT_FIXED_ACTOR_SIZES.items()}
+        return {k: v[:] for k, v in DEFAULT_FIXED_ACTOR_SIZES_WHL.items()}
 
     sizes: dict[str, list[float]] = {}
     in_section = False
@@ -44,7 +44,7 @@ def load_fixed_actor_sizes(config_path: str | None = None) -> dict[str, list[flo
         if len(nums) == 3:
             sizes[name.strip()] = nums
 
-    merged = {k: v[:] for k, v in DEFAULT_FIXED_ACTOR_SIZES.items()}
+    merged = {k: v[:] for k, v in DEFAULT_FIXED_ACTOR_SIZES_WHL.items()}
     merged.update(sizes)
     return merged
 

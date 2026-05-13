@@ -13,6 +13,7 @@ def points_inside_box(
     size: list[float],
     yaw: float,
 ) -> tuple[list[int], list[list[int]], float]:
+    width, height, length = [float(x) for x in size]
     pts = np.asarray(points_flat, dtype=np.float32)
     xyz = pts[:, :3]
     finite = np.isfinite(xyz).all(axis=1)
@@ -25,9 +26,9 @@ def points_inside_box(
     sin_y = math.sin(-yaw)
     local_x = shifted[:, 0] * cos_y - shifted[:, 1] * sin_y
     local_y = shifted[:, 0] * sin_y + shifted[:, 1] * cos_y
-    half_l = float(size[0]) * 0.5
-    half_w = float(size[1]) * 0.5
-    half_h = float(size[2]) * 0.5
+    half_l = length * 0.5
+    half_w = width * 0.5
+    half_h = height * 0.5
 
     inside = (
         valid
@@ -38,6 +39,6 @@ def points_inside_box(
     indices = np.flatnonzero(inside).astype(int).tolist()
     range_indices = [[int(i // W), int(i % W)] for i in indices]
 
-    expected_points = max(12.0, (float(size[0]) * float(size[1]) * float(size[2])) * 2.5)
+    expected_points = max(12.0, (width * height * length) * 2.5)
     mask_conf = min(1.0, len(indices) / expected_points)
     return indices, range_indices, float(mask_conf)
