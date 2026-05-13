@@ -15,7 +15,7 @@ from autolabeler.export.jsonl_exporter import export_jsonl
 from autolabeler.export.kitti_xml_exporter import export_kitti_xml
 from autolabeler.review.review_queue import build_review_queue
 from autolabeler.database.label_db import write_versioned_snapshot
-from autolabeler.data.kitti_mask_loader import build_manual_actor_labels, densify_actor_label_masks
+from autolabeler.data.kitti_mask_loader import build_manual_actor_labels, build_manual_labels, densify_actor_label_masks, densify_label_masks
 
 
 def main() -> None:
@@ -26,8 +26,9 @@ def main() -> None:
     p.add_argument("--input-format", choices=["auto", "bin", "csv"], default="auto")
     p.add_argument("--cache-bin-dir", default=None)
     p.add_argument("--mask-dir", default=None, help="Path to dataset/mask with frame_list.txt and tracklet_labels.xml")
+    p.add_argument("--noise-mask-dir", default=None, help="Path to KITTI XML manual noise masks with frame_list.txt and tracklet_labels.xml")
     p.add_argument("--openpcdet-predictions", default=None, help="JSONL predictions produced by scripts/run_openpcdet_teacher.py")
-    p.add_argument("--kitti-output-dir", default=None, help="Optional output dir for KITTI XML export of final actor labels")
+    p.add_argument("--kitti-output-dir", default=None, help="Optional output dir for KITTI XML export of final boxed labels")
     args = p.parse_args()
 
     index = build_dataset_index(args.input_dir, input_format=args.input_format)
@@ -38,6 +39,7 @@ def main() -> None:
     if mask_dir is None and default_mask_dir.exists():
         mask_dir = str(default_mask_dir)
     manual_by_frame = build_manual_actor_labels(mask_dir) if mask_dir else {}
+    manual_noise_by_frame = build_manual_labels(args.noise_mask_dir, branch_name="noise") if args.noise_mask_dir else {}
 
     actor = ActorAutoLabeler(
         openpcdet_predictions_path=args.openpcdet_predictions,
@@ -58,9 +60,18 @@ def main() -> None:
         manual_labels = densify_actor_label_masks(manual_by_frame.get(cur.frame_id, []), cur.points_flat)
         actor_labels = manual_labels + actor_labels
         actor_indices = sorted({i for label in actor_labels for i in label.point_indices})
-        masks = build_masks(len(cur.points_flat), actor_indices, [])
-        irr_labels = irr.run(sample, masks["removed_by_actor"])
-        noise_labels = noise.run(sample, masks["unexplained_residual"])
+        actor_masks = build_masks(len(cur.points_flat), actor_indices, [])
+        irr_labels = irr.run(sample, actor_masks["removed_by_actor"])
+        irregular_indices = sorted({i for label in irr_labels for i in label.point_indices})
+        masks = build_masks(len(cur.points_flat), actor_indices, irregular_indices)
+        manual_noise_labels = densify_label_masks(
+            manual_noise_by_frame.get(cur.frame_id, []),
+            cur.points_flat,
+            allowed_mask=masks["unexplained_residual"],
+        )
+        manual_noise_indices = {i for label in manual_noise_labels for i in label.point_indices}
+        noise_residual = [is_residual and i not in manual_noise_indices for i, is_residual in enumerate(masks["unexplained_residual"])]
+        noise_labels = manual_noise_labels + noise.run(sample, noise_residual)
         final_labels = arbitrate(actor_labels + irr_labels + noise_labels)
 
         results.append(AutoLabelingResult(frame_id=cur.frame_id, labels=final_labels))
@@ -69,7 +80,7 @@ def main() -> None:
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     export_jsonl(args.output, results)
     if args.kitti_output_dir:
-        export_kitti_xml(args.kitti_output_dir, results)
+        export_kitti_xml(args.kitti_output_dir, results, actor_only=False)
     review_items = build_review_queue(all_labels)
     write_versioned_snapshot(args.snapshot, [x.to_jsonable() for x in results], version="v0.1.0")
     print(f"exported_frames={len(results)} review_items={len(review_items)}")

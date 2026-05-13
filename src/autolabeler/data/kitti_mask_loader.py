@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
+from .bin_loader import W
 from .box_masking import points_inside_box
 from .schemas import Box3D, LabelInstance
 
@@ -17,6 +18,24 @@ OBJECT_TYPE_MAP = {
     "cyclist": "CYCLIST",
     "motorcycle": "MOTORCYCLE",
     "pedestrian": "PEDESTRIAN",
+}
+
+NOISE_CLASS_NAMES = {
+    "crosstalk_noise_1",
+    "crosstalk_noise_2",
+    "underground_mirror_noise",
+    "multiple_range_noise",
+    "multipath_noise",
+    "multi_machine_interference_noise",
+    "exhaust_gas_noise",
+    "horizontal_crosstalk_noise",
+    "dust_noise",
+    "vertical_crosstalk_noise",
+    "lane_line_crosstalk_noise",
+    "near_range_layered_noise",
+    "long_distance_noise",
+    "adhesive_noise",
+    "unknown_artifact",
 }
 
 
@@ -100,6 +119,10 @@ def load_tracklets_xml(xml_path: str) -> list[KittiTracklet]:
 
 
 def build_manual_actor_labels(mask_dir: str) -> dict[str, list[LabelInstance]]:
+    return build_manual_labels(mask_dir, branch_name="actor")
+
+
+def build_manual_labels(mask_dir: str, *, branch_name: str) -> dict[str, list[LabelInstance]]:
     frame_names = load_frame_list(str(Path(mask_dir) / "frame_list.txt"))
     tracklets = load_tracklets_xml(str(Path(mask_dir) / "tracklet_labels.xml"))
 
@@ -107,7 +130,8 @@ def build_manual_actor_labels(mask_dir: str) -> dict[str, list[LabelInstance]]:
     instance_id = 1
 
     for tr in tracklets:
-        semantic_class = OBJECT_TYPE_MAP.get(tr.object_type, tr.object_type.upper())
+        semantic_class = _semantic_class(tr.object_type, branch_name)
+        box_type = _box_type(branch_name)
         for pose in tr.poses:
             if pose.frame_index < 0 or pose.frame_index >= len(frame_names):
                 continue
@@ -119,13 +143,13 @@ def build_manual_actor_labels(mask_dir: str) -> dict[str, list[LabelInstance]]:
                 track_id=tr.track_id,
                 point_indices=[],
                 range_image_indices=[],
-                box_3d=Box3D(center=[pose.tx, pose.ty, pose.tz], size=[tr.l, tr.w, tr.h], yaw=pose.rz, box_type="fixed_actor"),
+                box_3d=Box3D(center=[pose.tx, pose.ty, pose.tz], size=[tr.l, tr.w, tr.h], yaw=pose.rz, box_type=box_type),
                 mask_confidence=1.0,
                 class_confidence=1.0,
                 box_confidence=1.0,
                 final_confidence=1.0,
                 provenance="manual",
-                branch_name="actor",
+                branch_name=branch_name,
                 teacher_sources=[],
                 review_status="reviewed_accepted",
                 pseudo_label_version="manual_seed",
@@ -137,6 +161,16 @@ def build_manual_actor_labels(mask_dir: str) -> dict[str, list[LabelInstance]]:
 
 
 def densify_actor_label_masks(labels: list[LabelInstance], points_flat: np.ndarray) -> list[LabelInstance]:
+    return densify_label_masks(labels, points_flat)
+
+
+def densify_label_masks(
+    labels: list[LabelInstance],
+    points_flat: np.ndarray,
+    *,
+    allowed_mask: list[bool] | np.ndarray | None = None,
+) -> list[LabelInstance]:
+    allowed = np.asarray(allowed_mask, dtype=bool) if allowed_mask is not None else None
     for label in labels:
         if label.box_3d is None:
             continue
@@ -146,7 +180,32 @@ def densify_actor_label_masks(labels: list[LabelInstance], points_flat: np.ndarr
             label.box_3d.size,
             label.box_3d.yaw,
         )
+        if allowed is not None:
+            point_indices = [idx for idx in point_indices if bool(allowed[idx])]
+            range_indices = [[int(idx // W), int(idx % W)] for idx in point_indices]
+            mask_conf = min(mask_conf, 1.0 if point_indices else 0.0)
         label.point_indices = point_indices
         label.range_image_indices = range_indices
         label.mask_confidence = mask_conf
     return labels
+
+
+def _semantic_class(object_type: str, branch_name: str) -> str:
+    normalized = _normalize_object_type(object_type)
+    if branch_name == "actor":
+        return OBJECT_TYPE_MAP.get(normalized, normalized.upper())
+    if branch_name == "noise":
+        return normalized
+    return OBJECT_TYPE_MAP.get(normalized, normalized)
+
+
+def _box_type(branch_name: str) -> str:
+    if branch_name == "actor":
+        return "fixed_actor"
+    if branch_name == "noise":
+        return "manual_noise_box"
+    return "adaptive_obb"
+
+
+def _normalize_object_type(object_type: str) -> str:
+    return object_type.strip().lower().replace(" ", "_").replace("-", "_")
