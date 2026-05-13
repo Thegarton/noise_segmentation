@@ -27,7 +27,7 @@ def prepare_openpcdet_points(
     input_format: str = "auto",
 ) -> list[OpenPCDetPreparedFrame]:
     records = build_dataset_index(input_dir, input_format=input_format)
-    points_dir = Path(output_dir) / "points"
+    points_dir = (Path(output_dir) / "points").resolve()
     points_dir.mkdir(parents=True, exist_ok=True)
 
     prepared: list[OpenPCDetPreparedFrame] = []
@@ -43,7 +43,7 @@ def prepare_openpcdet_points(
         points = points[finite & nonzero]
         out_path = points_dir / f"{record.frame_id}.npy"
         np.save(out_path, points.astype(np.float32))
-        prepared.append(OpenPCDetPreparedFrame(record.frame_id, record.lidar_path, str(out_path)))
+        prepared.append(OpenPCDetPreparedFrame(record.frame_id, str(Path(record.lidar_path).resolve()), str(out_path)))
 
     return prepared
 
@@ -76,13 +76,14 @@ def run_openpcdet_inference(
                 root_path=root_path,
                 logger=logger,
             )
-            self.sample_file_list = [Path(x.points_path) for x in prepared_frames]
+            self.sample_file_list = [Path(x.points_path).resolve() for x in prepared_frames]
 
         def __len__(self):
             return len(self.sample_file_list)
 
         def __getitem__(self, index):
             points = np.load(self.sample_file_list[index]).astype(np.float32)
+            points = _match_point_feature_dim(points, self.dataset_cfg)
             input_dict = {"points": points, "frame_id": prepared_frames[index].frame_id}
             return self.prepare_data(data_dict=input_dict)
 
@@ -164,3 +165,29 @@ def _resolve_cfg_file(openpcdet_root: str, cfg_file: str) -> str:
     if (root / cfg_file).exists():
         return str(root / cfg_file)
     return str(root / "tools" / cfg_file)
+
+
+def _match_point_feature_dim(points: np.ndarray, dataset_cfg) -> np.ndarray:
+    expected_dim = _expected_point_feature_dim(dataset_cfg)
+    if expected_dim is None or points.shape[-1] == expected_dim:
+        return points.astype(np.float32, copy=False)
+    if points.shape[-1] < expected_dim:
+        pad = np.zeros((points.shape[0], expected_dim - points.shape[-1]), dtype=np.float32)
+        return np.concatenate([points.astype(np.float32, copy=False), pad], axis=1)
+    return points[:, :expected_dim].astype(np.float32, copy=False)
+
+
+def _expected_point_feature_dim(dataset_cfg) -> int | None:
+    point_encoding = _cfg_get(dataset_cfg, "POINT_FEATURE_ENCODING")
+    if point_encoding is None:
+        return None
+    src_feature_list = _cfg_get(point_encoding, "src_feature_list")
+    if src_feature_list is None:
+        return None
+    return len(src_feature_list)
+
+
+def _cfg_get(cfg_obj, key: str):
+    if isinstance(cfg_obj, dict):
+        return cfg_obj.get(key)
+    return getattr(cfg_obj, key, None)

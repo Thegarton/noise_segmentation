@@ -9,7 +9,7 @@ from autolabeler.data.bin_loader import H, W, C
 from autolabeler.data.kitti_mask_loader import build_manual_actor_labels
 from autolabeler.export.kitti_xml_exporter import export_openpcdet_records_as_kitti_xml
 from autolabeler.data.schemas import OrganizedLiDARFrame, SequenceSample
-from autolabeler.teachers.openpcdet_adapter import prepare_openpcdet_points
+from autolabeler.teachers.openpcdet_adapter import _match_point_feature_dim, prepare_openpcdet_points
 
 
 def test_openpcdet_class_remap():
@@ -38,6 +38,28 @@ def test_prepare_openpcdet_points_from_csv(tmp_path: Path):
     points = np.load(prepared[0].points_path)
     assert points.shape == (1, 4)
     assert np.allclose(points[0], [1.0, 2.0, 3.0, 0.5])
+    assert Path(prepared[0].points_path).is_absolute()
+    assert Path(prepared[0].source_path).is_absolute()
+
+
+def test_match_point_feature_dim_pads_nuscenes_timestamp_feature():
+    points = np.asarray([[1.0, 2.0, 3.0, 0.5]], dtype=np.float32)
+    dataset_cfg = {"POINT_FEATURE_ENCODING": {"src_feature_list": ["x", "y", "z", "intensity", "timestamp"]}}
+
+    matched = _match_point_feature_dim(points, dataset_cfg)
+
+    assert matched.shape == (1, 5)
+    assert np.allclose(matched[0], [1.0, 2.0, 3.0, 0.5, 0.0])
+
+
+def test_match_point_feature_dim_truncates_extra_features():
+    points = np.asarray([[1.0, 2.0, 3.0, 0.5, 0.1, 0.2]], dtype=np.float32)
+    dataset_cfg = {"POINT_FEATURE_ENCODING": {"src_feature_list": ["x", "y", "z", "intensity"]}}
+
+    matched = _match_point_feature_dim(points, dataset_cfg)
+
+    assert matched.shape == (1, 4)
+    assert np.allclose(matched[0], [1.0, 2.0, 3.0, 0.5])
 
 
 def test_actor_autolabeler_consumes_openpcdet_predictions(tmp_path: Path):
