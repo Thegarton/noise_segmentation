@@ -12,6 +12,8 @@ def main() -> None:
     p.add_argument("--input-format", choices=["auto", "bin", "csv"], default="auto")
     p.add_argument("--prepared-dir", default="./out/openpcdet")
     p.add_argument("--output", default="./out/openpcdet_predictions.jsonl")
+    p.add_argument("--kitti-output-dir", default="./out/openpcdet_kitti_mask")
+    p.add_argument("--confidence-log", default=None)
     p.add_argument("--openpcdet-root", required=True, help="Path to cloned open-mmlab/OpenPCDet repository")
     p.add_argument("--cfg-file", required=True, help="OpenPCDet model config, e.g. cfgs/nuscenes_models/cbgs_centerpoint.yaml")
     p.add_argument("--ckpt", required=True, help="OpenPCDet pretrained checkpoint .pth")
@@ -30,8 +32,14 @@ def main() -> None:
         prepared_frames=prepared,
         output_jsonl=args.output,
         score_threshold=args.score_threshold,
+        kitti_output_dir=args.kitti_output_dir,
+        confidence_log_path=args.confidence_log,
     )
-    print(f"teacher_predictions={args.output} prepared_frames={len(prepared)}")
+    confidence_log = args.confidence_log or f"{args.kitti_output_dir}/detection_confidence_log.csv"
+    print(
+        f"teacher_predictions={args.output} prepared_frames={len(prepared)} "
+        f"kitti_mask_dir={args.kitti_output_dir} confidence_log={confidence_log}"
+    )
 
 
 if __name__ == "__main__":

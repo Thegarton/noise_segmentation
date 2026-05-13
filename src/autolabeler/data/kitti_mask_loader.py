@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
+import numpy as np
+
+from .box_masking import points_inside_box
 from .schemas import Box3D, LabelInstance
 
 
@@ -131,3 +134,19 @@ def build_manual_actor_labels(mask_dir: str) -> dict[str, list[LabelInstance]]:
             instance_id += 1
 
     return frame_to_labels
+
+
+def densify_actor_label_masks(labels: list[LabelInstance], points_flat: np.ndarray) -> list[LabelInstance]:
+    for label in labels:
+        if label.box_3d is None:
+            continue
+        point_indices, range_indices, mask_conf = points_inside_box(
+            points_flat,
+            label.box_3d.center,
+            label.box_3d.size,
+            label.box_3d.yaw,
+        )
+        label.point_indices = point_indices
+        label.range_image_indices = range_indices
+        label.mask_confidence = mask_conf
+    return labels

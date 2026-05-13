@@ -10,6 +10,7 @@ import numpy as np
 from ..actors.openpcdet_teacher import OPENPCDET_TEACHER_SOURCE, write_openpcdet_predictions_jsonl
 from ..data.dataset_indexer import FrameRecord, build_dataset_index
 from ..data.frame_loader import load_frame
+from ..export.kitti_xml_exporter import export_openpcdet_records_as_kitti_xml
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,9 @@ def run_openpcdet_inference(
     prepared_frames: list[OpenPCDetPreparedFrame],
     output_jsonl: str,
     score_threshold: float = 0.15,
-) -> None:
+    kitti_output_dir: str | None = None,
+    confidence_log_path: str | None = None,
+) -> list[dict]:
     _add_openpcdet_to_path(openpcdet_root)
 
     import torch
@@ -141,6 +144,9 @@ def run_openpcdet_inference(
         os.chdir(old_cwd)
 
     write_openpcdet_predictions_jsonl(output_jsonl, records)
+    if kitti_output_dir:
+        export_openpcdet_records_as_kitti_xml(kitti_output_dir, records, confidence_log_path=confidence_log_path)
+    return records
 
 
 def _add_openpcdet_to_path(openpcdet_root: str) -> None:

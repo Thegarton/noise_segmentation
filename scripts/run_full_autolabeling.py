@@ -12,9 +12,10 @@ from autolabeler.noise.noise_autolabeler import NoiseAutoLabeler
 from autolabeler.residual.residual_builder import build_masks
 from autolabeler.fusion.arbiter import arbitrate
 from autolabeler.export.jsonl_exporter import export_jsonl
+from autolabeler.export.kitti_xml_exporter import export_kitti_xml
 from autolabeler.review.review_queue import build_review_queue
 from autolabeler.database.label_db import write_versioned_snapshot
-from autolabeler.data.kitti_mask_loader import build_manual_actor_labels
+from autolabeler.data.kitti_mask_loader import build_manual_actor_labels, densify_actor_label_masks
 
 
 def main() -> None:
@@ -26,6 +27,7 @@ def main() -> None:
     p.add_argument("--cache-bin-dir", default=None)
     p.add_argument("--mask-dir", default=None, help="Path to dataset/mask with frame_list.txt and tracklet_labels.xml")
     p.add_argument("--openpcdet-predictions", default=None, help="JSONL predictions produced by scripts/run_openpcdet_teacher.py")
+    p.add_argument("--kitti-output-dir", default=None, help="Optional output dir for KITTI XML export of final actor labels")
     args = p.parse_args()
 
     index = build_dataset_index(args.input_dir, input_format=args.input_format)
@@ -53,7 +55,8 @@ def main() -> None:
         sample = SequenceSample(current=cur, past=past, future=future)
 
         actor_labels = actor.run(sample)
-        actor_labels = manual_by_frame.get(cur.frame_id, []) + actor_labels
+        manual_labels = densify_actor_label_masks(manual_by_frame.get(cur.frame_id, []), cur.points_flat)
+        actor_labels = manual_labels + actor_labels
         actor_indices = sorted({i for label in actor_labels for i in label.point_indices})
         masks = build_masks(len(cur.points_flat), actor_indices, [])
         irr_labels = irr.run(sample, masks["removed_by_actor"])
@@ -65,6 +68,8 @@ def main() -> None:
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     export_jsonl(args.output, results)
+    if args.kitti_output_dir:
+        export_kitti_xml(args.kitti_output_dir, results)
     review_items = build_review_queue(all_labels)
     write_versioned_snapshot(args.snapshot, [x.to_jsonable() for x in results], version="v0.1.0")
     print(f"exported_frames={len(results)} review_items={len(review_items)}")

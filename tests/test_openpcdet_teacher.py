@@ -6,6 +6,8 @@ import numpy as np
 from autolabeler.actors.actor_autolabeler import ActorAutoLabeler
 from autolabeler.actors.openpcdet_teacher import OpenPCDetPredictionStore, remap_openpcdet_class
 from autolabeler.data.bin_loader import H, W, C
+from autolabeler.data.kitti_mask_loader import build_manual_actor_labels
+from autolabeler.export.kitti_xml_exporter import export_openpcdet_records_as_kitti_xml
 from autolabeler.data.schemas import OrganizedLiDARFrame, SequenceSample
 from autolabeler.teachers.openpcdet_adapter import prepare_openpcdet_points
 
@@ -83,3 +85,40 @@ def test_actor_autolabeler_consumes_openpcdet_predictions(tmp_path: Path):
     assert label.teacher_sources == ["openpcdet_centerpoint_pointpillar_nuscenes"]
     assert label.box_3d is not None
     assert label.box_3d.size == [10.0, 2.6, 3.2]
+
+
+def test_teacher_predictions_export_to_kitti_tracklets_and_confidence_log(tmp_path: Path):
+    records = [
+        {
+            "frame_id": "frame_000",
+            "source_path": "/data/frame_000.csv",
+            "source": "openpcdet_centerpoint_pointpillar_nuscenes",
+            "predictions": [
+                {
+                    "class_name": "car",
+                    "score": 0.91,
+                    "box_3d": {
+                        "center": [10.0, 2.0, 0.3],
+                        "size": [4.2, 1.8, 1.6],
+                        "yaw": 0.2,
+                    },
+                }
+            ],
+        }
+    ]
+
+    out_dir = tmp_path / "openpcdet_kitti_mask"
+    export_openpcdet_records_as_kitti_xml(str(out_dir), records)
+
+    labels = build_manual_actor_labels(str(out_dir))
+    assert (out_dir / "frame_list.txt").read_text(encoding="utf-8") == "frame_000\n"
+    assert (out_dir / "detection_confidence_log.csv").exists()
+    assert len(labels["frame_000"]) == 1
+    label = labels["frame_000"][0]
+    assert label.semantic_class == "CAR"
+    assert label.box_3d is not None
+    assert label.box_3d.center == [10.0, 2.0, 0.3]
+    assert label.box_3d.size == [4.2, 1.8, 1.6]
+
+    log_text = (out_dir / "detection_confidence_log.csv").read_text(encoding="utf-8")
+    assert "frame_000,1,1,car,0.91,0.91,0.91" in log_text
