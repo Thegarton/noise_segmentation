@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections import OrderedDict
+import importlib.util
 from pathlib import Path
 import sys
 import traceback
+import types
 from typing import Any
 
 import numpy as np
@@ -37,6 +39,7 @@ class LitePTModelBundle:
     device: Any
     num_classes: int
     class_names: list[str]
+    pointrope_backend: str
 
 
 def build_litept_inference_plan(
@@ -88,6 +91,8 @@ def run_litept_inference(
     config_path: str = "configs/classes.yaml",
     litept_config: str | None = None,
     max_frames: int | None = None,
+    device: str | None = None,
+    force_torch_pointrope: bool = False,
 ) -> list[SemanticSegmentationResult]:
     plan = build_litept_inference_plan(
         litept_root=litept_root,
@@ -108,6 +113,8 @@ def run_litept_inference(
         checkpoint=plan.checkpoint,
         config_path=config_path,
         litept_config=litept_config,
+        device=device,
+        force_torch_pointrope=force_torch_pointrope,
     )
 
     results: list[SemanticSegmentationResult] = []
@@ -125,6 +132,8 @@ def run_litept_inference(
                     "label_space": "litept_nuscenes_semseg",
                     "class_names": model.class_names,
                     "ignore_index": 255,
+                    "device": str(model.device),
+                    "pointrope_backend": model.pointrope_backend,
                 },
             )
         )
@@ -137,10 +146,22 @@ def _add_litept_to_path(litept_root: str) -> None:
         sys.path.insert(0, root)
 
 
-def _load_litept_model(*, litept_root: str, checkpoint: str, config_path: str, litept_config: str | None):
+def _load_litept_model(
+    *,
+    litept_root: str,
+    checkpoint: str,
+    config_path: str,
+    litept_config: str | None,
+    device: str | None = None,
+    force_torch_pointrope: bool = False,
+):
     root = Path(litept_root).resolve()
     config_file = _resolve_litept_config(root, litept_config)
     checkpoint_file = _resolve_checkpoint_path(Path(checkpoint).resolve())
+    pointrope_backend = "cuda"
+    if force_torch_pointrope:
+        _install_torch_pointrope_module(root)
+        pointrope_backend = "torch"
 
     try:
         import torch
@@ -174,8 +195,8 @@ def _load_litept_model(*, litept_root: str, checkpoint: str, config_path: str, l
             f"error={type(exc).__name__}: {exc}"
         ) from exc
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    torch_device = torch.device(device if device else ("cuda" if torch.cuda.is_available() else "cpu"))
+    model.to(torch_device)
     model.eval()
 
     class_names = list(getattr(getattr(cfg, "data", {}), "names", []))
@@ -186,10 +207,29 @@ def _load_litept_model(*, litept_root: str, checkpoint: str, config_path: str, l
     return LitePTModelBundle(
         model=model,
         cfg=cfg,
-        device=device,
+        device=torch_device,
         num_classes=num_classes,
         class_names=class_names,
+        pointrope_backend=pointrope_backend,
     )
+
+
+def _install_torch_pointrope_module(litept_root: Path) -> None:
+    module_path = litept_root / "libs" / "pointrope" / "pointrope_torch.py"
+    if not module_path.exists():
+        raise FileNotFoundError(f"LitePT torch PointROPE fallback does not exist: {module_path}")
+
+    spec = importlib.util.spec_from_file_location("_autolabeler_litept_pointrope_torch", module_path)
+    if spec is None or spec.loader is None:
+        raise LitePTUnavailableError(f"Failed to load torch PointROPE fallback from: {module_path}")
+    torch_pointrope = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(torch_pointrope)
+
+    pointrope_package = types.ModuleType("libs.pointrope")
+    pointrope_package.PointROPE = torch_pointrope.PointROPE
+    pointrope_package.__all__ = ["PointROPE"]
+    pointrope_package.__file__ = str(module_path)
+    sys.modules["libs.pointrope"] = pointrope_package
 
 
 def _predict_frame(model: LitePTModelBundle, points_range: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

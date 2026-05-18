@@ -22,6 +22,12 @@ def main() -> None:
     p.add_argument("--config", default="configs/classes.yaml")
     p.add_argument("--litept-config", default=None, help="Optional LitePT-native config file")
     p.add_argument("--max-frames", type=int, default=None, help="Process only the first N frames")
+    p.add_argument("--device", default=None, help="Torch device, e.g. cuda, cuda:1, or cpu")
+    p.add_argument(
+        "--force-torch-pointrope",
+        action="store_true",
+        help="Use LitePT's pure PyTorch PointROPE fallback instead of the compiled CUDA extension",
+    )
     p.add_argument("--dry-run", action="store_true", help="Validate paths and frame discovery without importing LitePT")
     args = p.parse_args()
 
@@ -48,6 +54,8 @@ def main() -> None:
             config_path=args.config,
             litept_config=args.litept_config,
             max_frames=args.max_frames,
+            device=args.device,
+            force_torch_pointrope=args.force_torch_pointrope,
         )
     except LitePTUnavailableError as exc:
         raise SystemExit(str(exc)) from exc
