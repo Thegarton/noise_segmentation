@@ -42,3 +42,25 @@ PYTHONPATH=src python scripts/run_full_autolabeling.py \
   --openpcdet-predictions ./out/openpcdet_predictions.jsonl \
   --output ./out/labels.jsonl
 ```
+
+## Point-wise segmentation path
+
+The next pipeline version targets dense point-wise semantic segmentation instead of box-first labels.
+The primary output is a `192x480` semantic mask aligned with the organized LiDAR grid, plus a flattened
+`H*W` point-label view.
+
+LitePT integration is intentionally isolated from the lightweight core package. Run it from the dedicated
+conda environment:
+
+```bash
+conda activate LItePT
+PYTHONPATH=src python scripts/run_litept_inference.py \
+  --input-dir ./data \
+  --input-format csv \
+  --checkpoint /path/to/litept.ckpt \
+  --output-dir ./out/litept \
+  --config configs/classes.yaml
+```
+
+`scripts/run_litept_inference.py` is currently a stub for the next integration step. The semantic class ids
+and noise groups live in `configs/classes.yaml`.

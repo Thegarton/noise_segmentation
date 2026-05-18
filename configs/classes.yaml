@@ -6,3 +6,63 @@ fixed_actor_sizes:
   CYCLIST: [1.8, 0.7, 1.7]
   MOTORCYCLE: [2.1, 0.8, 1.5]
   PEDESTRIAN: [0.7, 0.7, 1.75]
+
+# Point-wise segmentation classes. The ids are stable training/export ids.
+semantic_classes:
+  background: 0
+  TRUCK_BUS: 1
+  CAR: 2
+  CYCLIST: 3
+  MOTORCYCLE: 4
+  PEDESTRIAN: 5
+  triangular_traffic_sign: 6
+  thin_horizontal_bar: 7
+  thin_vertical_bar: 8
+  traffic_sign: 9
+  roadblock: 10
+  wheel_chock: 11
+  tire: 12
+  road_stud: 13
+  traffic_cone: 14
+  crosstalk_noise_1: 15
+  crosstalk_noise_2: 16
+  horizontal_crosstalk_noise: 17
+  vertical_crosstalk_noise: 18
+  lane_line_crosstalk_noise: 19
+  dust_noise: 20
+  exhaust_gas_noise: 21
+  long_distance_noise: 22
+  adhesive_noise: 23
+  underground_mirror_noise: 24
+  multi_machine_interference_noise: 25
+  multipath_noise: 26
+  multiple_range_noise: 27
+  near_range_layered_noise: 28
+  unknown_noise: 29
+  unknown_object: 30
+  ignore: 255
+
+noise_groups:
+  crosstalk_noise:
+    - crosstalk_noise_1
+    - crosstalk_noise_2
+    - horizontal_crosstalk_noise
+    - vertical_crosstalk_noise
+    - lane_line_crosstalk_noise
+  dust_noise:
+    - dust_noise
+    - exhaust_gas_noise
+  long_distance_noise:
+    - long_distance_noise
+  adhesive_noise:
+    - adhesive_noise
+  underground_mirror_noise:
+    - underground_mirror_noise
+  multi_machine_interference_noise:
+    - multi_machine_interference_noise
+  multipath_noise:
+    - multipath_noise
+  multiple_range_noise:
+    - multiple_range_noise
+  near_range_layered_noise:
+    - near_range_layered_noise

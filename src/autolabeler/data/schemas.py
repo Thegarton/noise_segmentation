@@ -70,3 +70,12 @@ class AutoLabelingResult:
                 y["box_3d"] = None
             d["labels"].append(y)
         return d
+
+
+@dataclass
+class SemanticSegmentationResult:
+    frame_id: str
+    semantic_mask: Any
+    confidence_mask: Optional[Any] = None
+    pseudo_label_version: str = "semantic_v0"
+    provenance: Provenance = "student_predicted"
