@@ -55,6 +55,7 @@ conda environment:
 ```bash
 conda activate LItePT
 PYTHONPATH=src python scripts/run_litept_inference.py \
+  --litept-root ../LitePT \
   --input-dir ./data \
   --input-format csv \
   --checkpoint /path/to/litept.ckpt \
@@ -64,3 +65,15 @@ PYTHONPATH=src python scripts/run_litept_inference.py \
 
 `scripts/run_litept_inference.py` is currently a stub for the next integration step. The semantic class ids
 and noise groups live in `configs/classes.yaml`.
+
+Use `--dry-run` first to validate the external LitePT repo path and frame discovery without importing LitePT:
+
+```bash
+PYTHONPATH=src python scripts/run_litept_inference.py \
+  --litept-root ../LitePT \
+  --input-dir ./data \
+  --input-format csv \
+  --checkpoint ../weights/model.ckpt \
+  --output-dir ./out/litept \
+  --dry-run
+```
