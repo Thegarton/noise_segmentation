@@ -195,7 +195,7 @@ def _load_litept_model(
             f"error={type(exc).__name__}: {exc}"
         ) from exc
 
-    torch_device = torch.device(device if device else ("cuda" if torch.cuda.is_available() else "cpu"))
+    torch_device = _select_litept_device(torch, device)
     model.to(torch_device)
     model.eval()
 
@@ -212,6 +212,19 @@ def _load_litept_model(
         class_names=class_names,
         pointrope_backend=pointrope_backend,
     )
+
+
+def _select_litept_device(torch_module, requested_device: str | None):
+    if requested_device:
+        return torch_module.device(requested_device)
+    if not torch_module.cuda.is_available():
+        return torch_module.device("cpu")
+
+    for idx in range(torch_module.cuda.device_count()):
+        major, _minor = torch_module.cuda.get_device_capability(idx)
+        if major >= 8:
+            return torch_module.device(f"cuda:{idx}")
+    return torch_module.device("cuda:0")
 
 
 def _install_torch_pointrope_module(litept_root: Path) -> None:
