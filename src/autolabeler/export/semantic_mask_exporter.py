@@ -23,6 +23,7 @@ def export_semantic_segmentation_result(output_dir: str, result: SemanticSegment
         "pseudo_label_version": result.pseudo_label_version,
         "provenance": result.provenance,
     }
+    metadata.update(result.metadata)
 
     if result.confidence_mask is not None:
         confidence = np.asarray(result.confidence_mask, dtype=np.float32)

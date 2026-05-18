@@ -79,3 +79,4 @@ class SemanticSegmentationResult:
     confidence_mask: Optional[Any] = None
     pseudo_label_version: str = "semantic_v0"
     provenance: Provenance = "student_predicted"
+    metadata: dict[str, Any] = field(default_factory=dict)

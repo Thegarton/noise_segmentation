@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import OrderedDict
 from pathlib import Path
 import sys
-from typing import Iterable
+from typing import Any
 
 import numpy as np
 
-from ..data.dataset_indexer import FrameRecord, build_dataset_index
+from ..data.bin_loader import H, W
+from ..data.dataset_indexer import build_dataset_index
 from ..data.frame_loader import load_frame
 from ..data.schemas import SemanticSegmentationResult
 
@@ -20,10 +22,20 @@ class LitePTInferencePlan:
     output_dir: str
     frame_count: int
     frame_ids: list[str]
+    max_frames: int | None = None
 
 
 class LitePTUnavailableError(RuntimeError):
     pass
+
+
+@dataclass
+class LitePTModelBundle:
+    model: Any
+    cfg: Any
+    device: Any
+    num_classes: int
+    class_names: list[str]
 
 
 def build_litept_inference_plan(
@@ -34,7 +46,11 @@ def build_litept_inference_plan(
     output_dir: str,
     input_format: str = "auto",
     validate_checkpoint: bool = True,
+    max_frames: int | None = None,
 ) -> LitePTInferencePlan:
+    if max_frames is not None and max_frames <= 0:
+        raise ValueError(f"max_frames must be positive, got {max_frames}")
+
     root = Path(litept_root).expanduser().resolve()
     if not root.exists() or not root.is_dir():
         raise FileNotFoundError(f"LitePT root does not exist or is not a directory: {root}")
@@ -48,6 +64,8 @@ def build_litept_inference_plan(
         raise FileNotFoundError(f"Input dir does not exist or is not a directory: {input_path}")
 
     records = build_dataset_index(str(input_path), input_format=input_format)
+    if max_frames is not None:
+        records = records[:max_frames]
     return LitePTInferencePlan(
         litept_root=str(root),
         checkpoint=str(ckpt),
@@ -55,6 +73,7 @@ def build_litept_inference_plan(
         output_dir=str(Path(output_dir).expanduser().resolve()),
         frame_count=len(records),
         frame_ids=[r.frame_id for r in records],
+        max_frames=max_frames,
     )
 
 
@@ -67,6 +86,7 @@ def run_litept_inference(
     input_format: str = "auto",
     config_path: str = "configs/classes.yaml",
     litept_config: str | None = None,
+    max_frames: int | None = None,
 ) -> list[SemanticSegmentationResult]:
     plan = build_litept_inference_plan(
         litept_root=litept_root,
@@ -75,10 +95,13 @@ def run_litept_inference(
         output_dir=output_dir,
         input_format=input_format,
         validate_checkpoint=True,
+        max_frames=max_frames,
     )
     _add_litept_to_path(plan.litept_root)
 
     records = build_dataset_index(plan.input_dir, input_format=input_format)
+    if max_frames is not None:
+        records = records[:max_frames]
     model = _load_litept_model(
         litept_root=plan.litept_root,
         checkpoint=plan.checkpoint,
@@ -97,6 +120,11 @@ def run_litept_inference(
                 confidence_mask=confidence_mask,
                 pseudo_label_version="litept_pretrained_v0",
                 provenance="student_predicted",
+                metadata={
+                    "label_space": "litept_nuscenes_semseg",
+                    "class_names": model.class_names,
+                    "ignore_index": 255,
+                },
             )
         )
     return results
@@ -109,17 +137,183 @@ def _add_litept_to_path(litept_root: str) -> None:
 
 
 def _load_litept_model(*, litept_root: str, checkpoint: str, config_path: str, litept_config: str | None):
-    candidates = _candidate_entrypoints(Path(litept_root))
-    raise LitePTUnavailableError(
-        "LitePT model adapter is not wired to this external repository layout yet. "
-        "Run dry-run first, then inspect LitePT entrypoints and connect _load_litept_model/_predict_frame. "
-        f"litept_root={litept_root} checkpoint={checkpoint} config={config_path} "
-        f"litept_config={litept_config} candidate_files={candidates[:12]}"
+    root = Path(litept_root).resolve()
+    config_file = _resolve_litept_config(root, litept_config)
+    checkpoint_file = _resolve_checkpoint_path(Path(checkpoint).resolve())
+
+    try:
+        import torch
+        from utils.config import Config
+        from models import build_model  # imports model registries as side effects
+    except Exception as exc:  # pragma: no cover - depends on external LitePT env
+        raise LitePTUnavailableError(
+            "Failed to import LitePT runtime. Run this script inside the LItePT conda env "
+            f"and make sure LitePT custom ops are installed. litept_root={root}"
+        ) from exc
+
+    try:
+        cfg = Config.fromfile(str(config_file))
+        model = build_model(cfg.model)
+    except Exception as exc:  # pragma: no cover - depends on external LitePT env
+        raise LitePTUnavailableError(f"Failed to build LitePT model from config: {config_file}") from exc
+
+    checkpoint_obj = _torch_load_checkpoint(torch, checkpoint_file)
+    state_dict = _extract_state_dict(checkpoint_obj)
+    state_dict = _normalize_state_dict_keys(state_dict, model.state_dict().keys())
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as exc:
+        raise LitePTUnavailableError(
+            f"Checkpoint does not match LitePT config. checkpoint={checkpoint_file} config={config_file}"
+        ) from exc
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+
+    class_names = list(getattr(getattr(cfg, "data", {}), "names", []))
+    num_classes = int(getattr(getattr(cfg, "data", {}), "num_classes", getattr(cfg.model, "num_classes", 0)))
+    if not class_names:
+        class_names = [f"class_{i}" for i in range(num_classes)]
+
+    return LitePTModelBundle(
+        model=model,
+        cfg=cfg,
+        device=device,
+        num_classes=num_classes,
+        class_names=class_names,
     )
 
 
-def _predict_frame(model, points_range: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    raise LitePTUnavailableError("LitePT prediction is unavailable until _load_litept_model is implemented")
+def _predict_frame(model: LitePTModelBundle, points_range: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    try:
+        import torch
+        import torch.nn.functional as F
+        from datasets.transform import Compose, TRANSFORMS
+        from datasets.utils import collate_fn
+    except Exception as exc:  # pragma: no cover - depends on external LitePT env
+        raise LitePTUnavailableError("Failed to import LitePT inference transforms") from exc
+
+    arr = np.asarray(points_range, dtype=np.float32)
+    if arr.shape != (H, W, 4):
+        raise ValueError(f"LitePT expects organized frame shape {(H, W, 4)}, got {arr.shape}")
+
+    flat = arr.reshape(H * W, 4)
+    valid = np.isfinite(flat[:, :3]).all(axis=1)
+    valid &= ~(
+        (np.abs(flat[:, 0]) < 1e-4)
+        & (np.abs(flat[:, 1]) < 1e-4)
+        & (np.abs(flat[:, 2]) < 1e-4)
+    )
+    valid_indices = np.flatnonzero(valid)
+
+    semantic_flat = np.full((H * W,), 255, dtype=np.uint16)
+    confidence_flat = np.zeros((H * W,), dtype=np.float32)
+    if valid_indices.size == 0:
+        return semantic_flat.reshape(H, W), confidence_flat.reshape(H, W)
+
+    data_dict = {
+        "coord": flat[valid_indices, :3].astype(np.float32, copy=False),
+        "strength": _normalize_strength(flat[valid_indices, 3]).reshape(-1, 1),
+        "segment": np.full((valid_indices.size,), -1, dtype=np.int64),
+        "index_valid_keys": ["coord", "strength", "segment"],
+    }
+
+    test_cfg = model.cfg.data.test.test_cfg
+    voxelize = TRANSFORMS.build(test_cfg.voxelize)
+    post_transform = Compose(test_cfg.post_transform)
+
+    fragments = []
+    for part in voxelize(data_dict):
+        fragments.append(post_transform(part))
+
+    pred = torch.zeros((valid_indices.size, model.num_classes), device=model.device)
+    counts = torch.zeros((valid_indices.size, 1), device=model.device)
+    with torch.no_grad():
+        for fragment in fragments:
+            input_dict = collate_fn([fragment])
+            for key, value in list(input_dict.items()):
+                if isinstance(value, torch.Tensor):
+                    input_dict[key] = value.to(model.device, non_blocking=True)
+            idx_part = input_dict["index"].long()
+            pred_part = model.model(input_dict)["seg_logits"]
+            pred_part = F.softmax(pred_part, dim=-1)
+            pred.index_add_(0, idx_part, pred_part)
+            counts.index_add_(0, idx_part, torch.ones((idx_part.numel(), 1), device=model.device))
+
+    pred = pred / counts.clamp_min(1.0)
+    confidence, labels = pred.max(dim=1)
+    semantic_flat[valid_indices] = labels.detach().cpu().numpy().astype(np.uint16)
+    confidence_flat[valid_indices] = confidence.detach().cpu().numpy().astype(np.float32)
+    return semantic_flat.reshape(H, W), confidence_flat.reshape(H, W)
+
+
+def _resolve_litept_config(root: Path, litept_config: str | None) -> Path:
+    if litept_config is None:
+        path = root / "configs" / "nuscenes" / "semseg-litept-small-v1m1.py"
+    else:
+        candidate = Path(litept_config).expanduser()
+        path = candidate if candidate.is_absolute() else root / candidate
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"LitePT config does not exist: {path}")
+    return path.resolve()
+
+
+def _resolve_checkpoint_path(path: Path) -> Path:
+    if path.is_file():
+        return path
+    if not path.is_dir():
+        raise FileNotFoundError(f"LitePT checkpoint does not exist: {path}")
+
+    candidates = []
+    for pattern in ("*.pth", "*.pt", "*.ckpt"):
+        candidates.extend(sorted(path.glob(pattern)))
+    if not candidates:
+        raise FileNotFoundError(f"No .pth/.pt/.ckpt checkpoint files found in: {path}")
+    if len(candidates) > 1:
+        names = ", ".join(p.name for p in candidates[:8])
+        raise LitePTUnavailableError(
+            f"Checkpoint path is a directory with multiple checkpoint files. "
+            f"Pass one file explicitly. directory={path} candidates={names}"
+        )
+    return candidates[0].resolve()
+
+
+def _torch_load_checkpoint(torch_module, checkpoint_file: Path):
+    try:
+        return torch_module.load(str(checkpoint_file), map_location="cpu", weights_only=False)
+    except TypeError:  # older torch versions do not support weights_only
+        return torch_module.load(str(checkpoint_file), map_location="cpu")
+
+
+def _extract_state_dict(checkpoint_obj) -> OrderedDict:
+    if isinstance(checkpoint_obj, dict):
+        for key in ("state_dict", "model", "model_state_dict"):
+            if key in checkpoint_obj and isinstance(checkpoint_obj[key], dict):
+                return OrderedDict(checkpoint_obj[key])
+    if isinstance(checkpoint_obj, dict):
+        return OrderedDict(checkpoint_obj)
+    raise LitePTUnavailableError("Unsupported LitePT checkpoint format: expected a dict/state_dict")
+
+
+def _normalize_state_dict_keys(state_dict: OrderedDict, model_keys) -> OrderedDict:
+    model_keys = set(model_keys)
+    if not state_dict:
+        return state_dict
+    keys = list(state_dict.keys())
+    if all(key.startswith("module.") for key in keys) and not any(key.startswith("module.") for key in model_keys):
+        return OrderedDict((key[7:], value) for key, value in state_dict.items())
+    if not any(key.startswith("module.") for key in keys) and any(key.startswith("module.") for key in model_keys):
+        return OrderedDict((f"module.{key}", value) for key, value in state_dict.items())
+    return state_dict
+
+
+def _normalize_strength(intensity: np.ndarray) -> np.ndarray:
+    strength = np.asarray(intensity, dtype=np.float32)
+    finite = np.isfinite(strength)
+    if finite.any() and float(np.nanmax(strength[finite])) > 1.5:
+        strength = strength / 255.0
+    return strength.astype(np.float32, copy=False)
 
 
 def _candidate_entrypoints(root: Path) -> list[str]:

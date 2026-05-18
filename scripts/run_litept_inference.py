@@ -21,6 +21,7 @@ def main() -> None:
     p.add_argument("--output-dir", required=True)
     p.add_argument("--config", default="configs/classes.yaml")
     p.add_argument("--litept-config", default=None, help="Optional LitePT-native config file")
+    p.add_argument("--max-frames", type=int, default=None, help="Process only the first N frames")
     p.add_argument("--dry-run", action="store_true", help="Validate paths and frame discovery without importing LitePT")
     args = p.parse_args()
 
@@ -32,6 +33,7 @@ def main() -> None:
             output_dir=args.output_dir,
             input_format=args.input_format,
             validate_checkpoint=False,
+            max_frames=args.max_frames,
         )
         print(json.dumps(plan.__dict__, ensure_ascii=False, indent=2))
         return
@@ -45,6 +47,7 @@ def main() -> None:
             input_format=args.input_format,
             config_path=args.config,
             litept_config=args.litept_config,
+            max_frames=args.max_frames,
         )
     except LitePTUnavailableError as exc:
         raise SystemExit(str(exc)) from exc

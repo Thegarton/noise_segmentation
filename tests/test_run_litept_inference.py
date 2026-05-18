@@ -13,6 +13,7 @@ def test_run_litept_inference_dry_run_cli(tmp_path: Path):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     (data_dir / "frame_000.bin").write_bytes(bytes(H * W * 4 * 4))
+    (data_dir / "frame_001.bin").write_bytes(bytes(H * W * 4 * 4))
 
     script = Path(__file__).resolve().parents[1] / "scripts" / "run_litept_inference.py"
     result = subprocess.run(
@@ -29,6 +30,8 @@ def test_run_litept_inference_dry_run_cli(tmp_path: Path):
             "bin",
             "--output-dir",
             str(tmp_path / "out"),
+            "--max-frames",
+            "1",
             "--dry-run",
         ],
         check=True,
@@ -40,3 +43,4 @@ def test_run_litept_inference_dry_run_cli(tmp_path: Path):
     payload = json.loads(result.stdout)
     assert payload["frame_count"] == 1
     assert payload["frame_ids"] == ["frame_000"]
+    assert payload["max_frames"] == 1

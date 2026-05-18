@@ -31,6 +31,28 @@ def test_litept_dry_run_plan_discovers_frames_without_checkpoint(tmp_path: Path)
     assert plan.litept_root == str(litept_root.resolve())
 
 
+def test_litept_plan_can_limit_frame_count(tmp_path: Path):
+    litept_root = tmp_path / "LitePT"
+    litept_root.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    for idx in range(3):
+        (data_dir / f"frame_{idx:03d}.bin").write_bytes(bytes(H * W * 4 * 4))
+
+    plan = build_litept_inference_plan(
+        litept_root=str(litept_root),
+        checkpoint=str(tmp_path / "missing.ckpt"),
+        input_dir=str(data_dir),
+        output_dir=str(tmp_path / "out"),
+        input_format="bin",
+        validate_checkpoint=False,
+        max_frames=2,
+    )
+
+    assert plan.frame_count == 2
+    assert plan.frame_ids == ["frame_000", "frame_001"]
+
+
 def test_litept_plan_rejects_missing_root(tmp_path: Path):
     with pytest.raises(FileNotFoundError, match="LitePT root does not exist"):
         build_litept_inference_plan(
@@ -51,7 +73,7 @@ def test_litept_runtime_reports_unwired_external_repo(tmp_path: Path):
     data_dir.mkdir()
     (data_dir / "frame_000.bin").write_bytes(bytes(H * W * 4 * 4))
 
-    with pytest.raises(LitePTUnavailableError, match="not wired to this external repository layout"):
+    with pytest.raises(FileNotFoundError, match="LitePT config does not exist"):
         run_litept_inference(
             litept_root=str(litept_root),
             checkpoint=str(checkpoint),
