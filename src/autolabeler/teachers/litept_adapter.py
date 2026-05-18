@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from collections import OrderedDict
 from pathlib import Path
 import sys
+import traceback
 from typing import Any
 
 import numpy as np
@@ -148,14 +149,19 @@ def _load_litept_model(*, litept_root: str, checkpoint: str, config_path: str, l
     except Exception as exc:  # pragma: no cover - depends on external LitePT env
         raise LitePTUnavailableError(
             "Failed to import LitePT runtime. Run this script inside the LItePT conda env "
-            f"and make sure LitePT custom ops are installed. litept_root={root}"
+            "and make sure LitePT dependencies/custom ops are installed. "
+            f"litept_root={root} error={type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc(limit=12)}"
         ) from exc
 
     try:
         cfg = Config.fromfile(str(config_file))
         model = build_model(cfg.model)
     except Exception as exc:  # pragma: no cover - depends on external LitePT env
-        raise LitePTUnavailableError(f"Failed to build LitePT model from config: {config_file}") from exc
+        raise LitePTUnavailableError(
+            f"Failed to build LitePT model from config: {config_file} "
+            f"error={type(exc).__name__}: {exc}\n{traceback.format_exc(limit=12)}"
+        ) from exc
 
     checkpoint_obj = _torch_load_checkpoint(torch, checkpoint_file)
     state_dict = _extract_state_dict(checkpoint_obj)
@@ -164,7 +170,8 @@ def _load_litept_model(*, litept_root: str, checkpoint: str, config_path: str, l
         model.load_state_dict(state_dict, strict=True)
     except RuntimeError as exc:
         raise LitePTUnavailableError(
-            f"Checkpoint does not match LitePT config. checkpoint={checkpoint_file} config={config_file}"
+            f"Checkpoint does not match LitePT config. checkpoint={checkpoint_file} config={config_file} "
+            f"error={type(exc).__name__}: {exc}"
         ) from exc
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
