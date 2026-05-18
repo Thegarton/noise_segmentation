@@ -37,6 +37,8 @@ class LitePTModelBundle:
     model: Any
     cfg: Any
     device: Any
+    device_name: str
+    device_capability: tuple[int, int] | None
     num_classes: int
     class_names: list[str]
     pointrope_backend: str
@@ -133,6 +135,8 @@ def run_litept_inference(
                     "class_names": model.class_names,
                     "ignore_index": 255,
                     "device": str(model.device),
+                    "device_name": model.device_name,
+                    "device_capability": model.device_capability,
                     "pointrope_backend": model.pointrope_backend,
                 },
             )
@@ -196,6 +200,13 @@ def _load_litept_model(
         ) from exc
 
     torch_device = _select_litept_device(torch, device)
+    device_name, device_capability = _describe_torch_device(torch, torch_device)
+    _validate_litept_device(torch_device, device_name, device_capability)
+    print(
+        f"LitePT device: {torch_device} name={device_name} "
+        f"capability={device_capability} pointrope={pointrope_backend}",
+        flush=True,
+    )
     model.to(torch_device)
     model.eval()
 
@@ -208,6 +219,8 @@ def _load_litept_model(
         model=model,
         cfg=cfg,
         device=torch_device,
+        device_name=device_name,
+        device_capability=device_capability,
         num_classes=num_classes,
         class_names=class_names,
         pointrope_backend=pointrope_backend,
@@ -225,6 +238,30 @@ def _select_litept_device(torch_module, requested_device: str | None):
         if major >= 8:
             return torch_module.device(f"cuda:{idx}")
     return torch_module.device("cuda:0")
+
+
+def _describe_torch_device(torch_module, device) -> tuple[str, tuple[int, int] | None]:
+    if device.type != "cuda":
+        return str(device), None
+    index = device.index if device.index is not None else torch_module.cuda.current_device()
+    return torch_module.cuda.get_device_name(index), tuple(torch_module.cuda.get_device_capability(index))
+
+
+def _validate_litept_device(device, device_name: str, device_capability: tuple[int, int] | None) -> None:
+    if device.type != "cuda":
+        raise LitePTUnavailableError(
+            "LitePT NuScenes semantic config uses FlashAttention and requires a CUDA GPU. "
+            f"Selected device={device}"
+        )
+    if device_capability is None or device_capability[0] < 8:
+        raise LitePTUnavailableError(
+            "LitePT NuScenes semantic config uses FlashAttention, which requires Ampere or newer GPU "
+            f"(compute capability >= 8.0). Selected device={device} name={device_name} "
+            f"capability={device_capability}. On your machine this likely means the process still sees "
+            "Tesla T4 instead of RTX A4000. Check CUDA_VISIBLE_DEVICES with: "
+            "CUDA_VISIBLE_DEVICES=1 python -c \"import torch; print(torch.cuda.get_device_name(0), "
+            "torch.cuda.get_device_capability(0))\""
+        )
 
 
 def _install_torch_pointrope_module(litept_root: Path) -> None:
