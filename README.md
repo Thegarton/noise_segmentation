@@ -42,3 +42,30 @@ PYTHONPATH=src python scripts/run_full_autolabeling.py \
   --openpcdet-predictions ./out/openpcdet_predictions.jsonl \
   --output ./out/labels.jsonl
 ```
+
+## Point-wise segmentation visualization
+
+Install the optional PyVista viewer dependency:
+
+```bash
+pip install -e ".[visualization]"
+```
+
+Visualize litept semantic mask and confidence for an organized LiDAR frame:
+
+```bash
+python3 scripts/visualize_point_segmentation.py \
+  --points ./data/000009.bin \
+  --semantic-mask ./out/semantic_mask.npy \
+  --confidence ./out/confidence.npy \
+  --allow-range-resize
+```
+
+Visualize final pseudo-labels from `labels.jsonl`:
+
+```bash
+python3 scripts/visualize_point_segmentation.py \
+  --points ./data/000009.bin \
+  --labels-jsonl ./out/labels.jsonl \
+  --frame-id 000009
+```
