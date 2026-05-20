@@ -40,6 +40,10 @@ def main() -> None:
         width=args.width,
         allow_resize=args.allow_range_resize,
     )
+    if args.legacy_raw_csv_mask_order:
+        semantic = remap_legacy_raw_csv_mask_order(semantic, height=args.height, width=args.width)
+        if confidence is not None:
+            confidence = remap_legacy_raw_csv_mask_order(confidence, height=args.height, width=args.width)
 
     keep = np.isfinite(points).all(axis=1)
     if args.drop_zero_points:
@@ -93,6 +97,11 @@ def parse_args() -> argparse.Namespace:
         "--drop-zero-points",
         action="store_true",
         help="Hide points at exactly (0, 0, 0), useful for padded frames.",
+    )
+    p.add_argument(
+        "--legacy-raw-csv-mask-order",
+        action="store_true",
+        help="Remap masks exported before the raw packet CSV loader transpose fix.",
     )
     return p.parse_args()
 
@@ -282,6 +291,19 @@ def resize_range_mask_nearest(arr: np.ndarray, *, height: int, width: int, name:
         raise ValueError(f"{name} width {arr.shape[1]} cannot be repeated to target width {width}")
     repeat = width // arr.shape[1]
     return np.repeat(arr, repeat, axis=1)
+
+
+def remap_legacy_raw_csv_mask_order(mask: np.ndarray, *, height: int = H, width: int = W) -> np.ndarray:
+    """Map masks exported by the old raw CSV loader to the fixed [beam, azimuth] layout.
+
+    The old loader flattened raw packet data as [azimuth, beam] and then reshaped it
+    directly to [beam, azimuth]. The fixed loader explicitly transposes that layout.
+    """
+    flat = np.asarray(mask).reshape(-1)
+    expected = height * width
+    if flat.size != expected:
+        raise ValueError(f"Legacy remap expects {expected} values, got {flat.size}")
+    return flat.reshape(width, height).T.reshape(-1)
 
 
 def labels_jsonl_to_semantic(path: str, frame_id: str, point_count: int) -> np.ndarray:
