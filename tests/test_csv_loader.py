@@ -5,6 +5,7 @@ import numpy as np
 
 from autolabeler.data.csv_loader import load_csv
 from autolabeler.data.bin_loader import H, W
+from autolabeler.data.schemas import OrganizedLiDARFrame
 
 
 def test_load_csv_organized(tmp_path: Path):
@@ -55,3 +56,11 @@ def test_load_raw_packet_csv_preserves_beam_azimuth_layout(tmp_path: Path):
     assert frame.meta["strength_channel"] == "ref"
     assert np.isclose(frame.points_range[5, 0, 3], 150.0)
     assert np.isclose(frame.points_range[5, 7, 3], 157.0)
+
+
+def test_load_fixed_sample_csv(fixed_csv_path: Path):
+    frame = load_csv(str(fixed_csv_path), frame_id="frame_0001")
+
+    assert isinstance(frame, OrganizedLiDARFrame)
+    assert frame.points_range.shape == (H, W, 4), "incorrect pc shape"
+    assert frame.points_flat.shape == (H * W, 4), "incorrect flat pc shape"
