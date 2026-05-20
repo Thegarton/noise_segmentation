@@ -77,3 +77,27 @@ PYTHONPATH=src python scripts/run_litept_inference.py \
   --output-dir ./out/litept \
   --dry-run
 ```
+
+## Point-wise segmentation visualization
+
+Install the optional PyVista viewer dependency:
+
+```bash
+pip install -e ".[visualization]"
+```
+
+Visualize LitePT semantic mask and confidence for an organized LiDAR CSV frame:
+
+```bash
+python3 scripts/visualize_point_segmentation.py \
+  --points ./data/000009.csv \
+  --semantic-mask ./out/litept/000009/semantic_mask.npy \
+  --confidence ./out/litept/000009/confidence.npy \
+  --allow-range-resize
+```
+
+For notebook-based inspection with fixed camera position, open:
+
+```bash
+jupyter notebook notebooks/visualize_point_segmentation.ipynb
+```
