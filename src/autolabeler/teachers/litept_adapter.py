@@ -21,6 +21,8 @@ from ..data.schemas import SemanticSegmentationResult
 class LitePTInferencePlan:
     litept_root: str
     checkpoint: str
+    litept_config: str
+    litept_dataset: str
     input_dir: str
     output_dir: str
     frame_count: int
@@ -42,15 +44,20 @@ class LitePTModelBundle:
     num_classes: int
     class_names: list[str]
     pointrope_backend: str
+    dataset_name: str
+    config_file: str
+    checkpoint_file: str
 
 
 def build_litept_inference_plan(
     *,
     litept_root: str,
-    checkpoint: str,
+    checkpoint: str | None,
     input_dir: str,
     output_dir: str,
     input_format: str = "auto",
+    litept_dataset: str = "nuscenes",
+    litept_config: str | None = None,
     validate_checkpoint: bool = True,
     max_frames: int | None = None,
 ) -> LitePTInferencePlan:
@@ -61,9 +68,11 @@ def build_litept_inference_plan(
     if not root.exists() or not root.is_dir():
         raise FileNotFoundError(f"LitePT root does not exist or is not a directory: {root}")
 
-    ckpt = Path(checkpoint).expanduser().resolve()
+    dataset = _validate_litept_dataset(litept_dataset)
+    ckpt = _resolve_litept_checkpoint(root, dataset, checkpoint)
     if validate_checkpoint and not ckpt.exists():
         raise FileNotFoundError(f"LitePT checkpoint does not exist: {ckpt}")
+    config_file = _resolve_litept_config(root, dataset, litept_config, validate_exists=False)
 
     input_path = Path(input_dir).expanduser().resolve()
     if not input_path.exists() or not input_path.is_dir():
@@ -75,6 +84,8 @@ def build_litept_inference_plan(
     return LitePTInferencePlan(
         litept_root=str(root),
         checkpoint=str(ckpt),
+        litept_config=str(config_file),
+        litept_dataset=dataset,
         input_dir=str(input_path),
         output_dir=str(Path(output_dir).expanduser().resolve()),
         frame_count=len(records),
@@ -86,11 +97,12 @@ def build_litept_inference_plan(
 def run_litept_inference(
     *,
     litept_root: str,
-    checkpoint: str,
+    checkpoint: str | None,
     input_dir: str,
     output_dir: str,
     input_format: str = "auto",
     config_path: str = "configs/classes.yaml",
+    litept_dataset: str = "nuscenes",
     litept_config: str | None = None,
     max_frames: int | None = None,
     device: str | None = None,
@@ -102,6 +114,8 @@ def run_litept_inference(
         input_dir=input_dir,
         output_dir=output_dir,
         input_format=input_format,
+        litept_dataset=litept_dataset,
+        litept_config=litept_config,
         validate_checkpoint=True,
         max_frames=max_frames,
     )
@@ -114,7 +128,8 @@ def run_litept_inference(
         litept_root=plan.litept_root,
         checkpoint=plan.checkpoint,
         config_path=config_path,
-        litept_config=litept_config,
+        litept_dataset=plan.litept_dataset,
+        litept_config=plan.litept_config,
         device=device,
         force_torch_pointrope=force_torch_pointrope,
     )
@@ -131,8 +146,12 @@ def run_litept_inference(
                 pseudo_label_version="litept_pretrained_v0",
                 provenance="student_predicted",
                 metadata={
-                    "label_space": "litept_nuscenes_semseg",
+                    "label_space": f"litept_{model.dataset_name}_semseg",
+                    "litept_dataset": model.dataset_name,
+                    "litept_config": model.config_file,
+                    "checkpoint": model.checkpoint_file,
                     "class_names": model.class_names,
+                    "num_classes": model.num_classes,
                     "ignore_index": 255,
                     "device": str(model.device),
                     "device_name": model.device_name,
@@ -155,12 +174,14 @@ def _load_litept_model(
     litept_root: str,
     checkpoint: str,
     config_path: str,
+    litept_dataset: str,
     litept_config: str | None,
     device: str | None = None,
     force_torch_pointrope: bool = False,
 ):
     root = Path(litept_root).resolve()
-    config_file = _resolve_litept_config(root, litept_config)
+    dataset = _validate_litept_dataset(litept_dataset)
+    config_file = _resolve_litept_config(root, dataset, litept_config, validate_exists=True)
     checkpoint_file = _resolve_checkpoint_path(Path(checkpoint).resolve())
     pointrope_backend = "cuda"
     if force_torch_pointrope:
@@ -224,6 +245,9 @@ def _load_litept_model(
         num_classes=num_classes,
         class_names=class_names,
         pointrope_backend=pointrope_backend,
+        dataset_name=dataset,
+        config_file=str(config_file),
+        checkpoint_file=str(checkpoint_file),
     )
 
 
@@ -250,12 +274,12 @@ def _describe_torch_device(torch_module, device) -> tuple[str, tuple[int, int] |
 def _validate_litept_device(device, device_name: str, device_capability: tuple[int, int] | None) -> None:
     if device.type != "cuda":
         raise LitePTUnavailableError(
-            "LitePT NuScenes semantic config uses FlashAttention and requires a CUDA GPU. "
+            "LitePT semantic config uses FlashAttention and requires a CUDA GPU. "
             f"Selected device={device}"
         )
     if device_capability is None or device_capability[0] < 8:
         raise LitePTUnavailableError(
-            "LitePT NuScenes semantic config uses FlashAttention, which requires Ampere or newer GPU "
+            "LitePT semantic config uses FlashAttention, which requires Ampere or newer GPU "
             f"(compute capability >= 8.0). Selected device={device} name={device_name} "
             f"capability={device_capability}. On your machine this likely means the process still sees "
             "Tesla T4 instead of RTX A4000. Check CUDA_VISIBLE_DEVICES with: "
@@ -345,13 +369,31 @@ def _predict_frame(model: LitePTModelBundle, points_range: np.ndarray) -> tuple[
     return semantic_flat.reshape(H, W), confidence_flat.reshape(H, W)
 
 
-def _resolve_litept_config(root: Path, litept_config: str | None) -> Path:
+def _validate_litept_dataset(litept_dataset: str) -> str:
+    if litept_dataset not in {"nuscenes", "waymo"}:
+        raise ValueError(f"Unsupported LitePT dataset: {litept_dataset}. Expected one of: nuscenes, waymo")
+    return litept_dataset
+
+
+def _resolve_litept_checkpoint(root: Path, litept_dataset: str, checkpoint: str | None) -> Path:
+    if checkpoint is None:
+        return (root / "pth" / litept_dataset / "model_best.pth").resolve()
+    return Path(checkpoint).expanduser().resolve()
+
+
+def _resolve_litept_config(
+    root: Path,
+    litept_dataset: str,
+    litept_config: str | None,
+    *,
+    validate_exists: bool = True,
+) -> Path:
     if litept_config is None:
-        path = root / "configs" / "nuscenes" / "semseg-litept-small-v1m1.py"
+        path = root / "configs" / litept_dataset / "semseg-litept-small-v1m1.py"
     else:
         candidate = Path(litept_config).expanduser()
         path = candidate if candidate.is_absolute() else root / candidate
-    if not path.exists() or not path.is_file():
+    if validate_exists and (not path.exists() or not path.is_file()):
         raise FileNotFoundError(f"LitePT config does not exist: {path}")
     return path.resolve()
 

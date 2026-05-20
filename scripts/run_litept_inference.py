@@ -17,10 +17,15 @@ def main() -> None:
     p.add_argument("--litept-root", required=True, help="Path to the cloned LitePT repository")
     p.add_argument("--input-dir", required=True)
     p.add_argument("--input-format", choices=["auto", "bin", "csv"], default="auto")
-    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--litept-dataset", choices=["nuscenes", "waymo"], default="nuscenes")
+    p.add_argument("--checkpoint", default=None, help="Optional checkpoint override. Defaults to pth/<dataset>/model_best.pth")
     p.add_argument("--output-dir", required=True)
     p.add_argument("--config", default="configs/classes.yaml")
-    p.add_argument("--litept-config", default=None, help="Optional LitePT-native config file")
+    p.add_argument(
+        "--litept-config",
+        default=None,
+        help="Optional LitePT-native config override. Defaults to configs/<dataset>/semseg-litept-small-v1m1.py",
+    )
     p.add_argument("--max-frames", type=int, default=None, help="Process only the first N frames")
     p.add_argument("--device", default=None, help="Torch device, e.g. cuda, cuda:1, or cpu")
     p.add_argument(
@@ -38,6 +43,8 @@ def main() -> None:
             input_dir=args.input_dir,
             output_dir=args.output_dir,
             input_format=args.input_format,
+            litept_dataset=args.litept_dataset,
+            litept_config=args.litept_config,
             validate_checkpoint=False,
             max_frames=args.max_frames,
         )
@@ -52,6 +59,7 @@ def main() -> None:
             output_dir=args.output_dir,
             input_format=args.input_format,
             config_path=args.config,
+            litept_dataset=args.litept_dataset,
             litept_config=args.litept_config,
             max_frames=args.max_frames,
             device=args.device,

@@ -58,13 +58,27 @@ PYTHONPATH=src python scripts/run_litept_inference.py \
   --litept-root ../LitePT \
   --input-dir ./data \
   --input-format csv \
-  --checkpoint /path/to/litept.ckpt \
-  --output-dir ./out/litept \
+  --litept-dataset nuscenes \
+  --output-dir ./out/litept_nuscenes \
   --config configs/classes.yaml
 ```
 
 `scripts/run_litept_inference.py` is currently a stub for the next integration step. The semantic class ids
 and noise groups live in `configs/classes.yaml`.
+By default, NuScenes uses `../LitePT/configs/nuscenes/semseg-litept-small-v1m1.py` and
+`../LitePT/pth/nuscenes/model_best.pth`. To run the Waymo preset, switch the dataset and output dir:
+
+```bash
+PYTHONPATH=src python scripts/run_litept_inference.py \
+  --litept-root ../LitePT \
+  --input-dir ./data \
+  --input-format csv \
+  --litept-dataset waymo \
+  --output-dir ./out/litept_waymo \
+  --config configs/classes.yaml
+```
+
+Use `--litept-config` or `--checkpoint` only when overriding the preset paths.
 
 Use `--dry-run` first to validate the external LitePT repo path and frame discovery without importing LitePT:
 
@@ -73,8 +87,8 @@ PYTHONPATH=src python scripts/run_litept_inference.py \
   --litept-root ../LitePT \
   --input-dir ./data \
   --input-format csv \
-  --checkpoint ../weights/model.ckpt \
-  --output-dir ./out/litept \
+  --litept-dataset waymo \
+  --output-dir ./out/litept_waymo \
   --dry-run
 ```
 
