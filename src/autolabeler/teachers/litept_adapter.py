@@ -14,6 +14,7 @@ import numpy as np
 from ..data.bin_loader import H, W
 from ..data.dataset_indexer import build_dataset_index
 from ..data.frame_loader import load_frame
+from ..data.ins_pose import InsPoseIndex, load_ins_pose_index
 from ..data.schemas import SemanticSegmentationResult
 
 
@@ -107,6 +108,8 @@ def run_litept_inference(
     max_frames: int | None = None,
     device: str | None = None,
     force_torch_pointrope: bool = False,
+    ins_path: str | None = None,
+    skip_pose_export: bool = False,
 ) -> list[SemanticSegmentationResult]:
     plan = build_litept_inference_plan(
         litept_root=litept_root,
@@ -124,6 +127,7 @@ def run_litept_inference(
     records = build_dataset_index(plan.input_dir, input_format=input_format)
     if max_frames is not None:
         records = records[:max_frames]
+    pose_index = None if skip_pose_export or ins_path is None else load_ins_pose_index(ins_path)
     model = _load_litept_model(
         litept_root=plan.litept_root,
         checkpoint=plan.checkpoint,
@@ -137,6 +141,7 @@ def run_litept_inference(
     results: list[SemanticSegmentationResult] = []
     for record in records:
         frame = load_frame(record.lidar_path, record.frame_id, input_format=input_format)
+        pose_metadata = _pose_metadata(frame.timestamp_us, pose_index)
         semantic_mask, confidence_mask = _predict_frame(model, frame.points_range)
         results.append(
             SemanticSegmentationResult(
@@ -157,10 +162,20 @@ def run_litept_inference(
                     "device_name": model.device_name,
                     "device_capability": model.device_capability,
                     "pointrope_backend": model.pointrope_backend,
+                    **pose_metadata,
                 },
             )
         )
     return results
+
+
+def _pose_metadata(timestamp_us: int | None, pose_index: InsPoseIndex | None) -> dict[str, Any]:
+    if pose_index is None:
+        return {}
+    if timestamp_us is None:
+        raise ValueError("Cannot match INS pose because frame timestamp_us is missing")
+    pose = pose_index.nearest(timestamp_us)
+    return {"ego_pose": pose.to_jsonable()}
 
 
 def _add_litept_to_path(litept_root: str) -> None:

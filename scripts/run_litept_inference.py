@@ -28,6 +28,8 @@ def main() -> None:
     )
     p.add_argument("--max-frames", type=int, default=None, help="Process only the first N frames")
     p.add_argument("--device", default=None, help="Torch device, e.g. cuda, cuda:1, or cpu")
+    p.add_argument("--ins-path", default=None, help="Optional INS file path. Defaults to <input-dir>/ins when it exists.")
+    p.add_argument("--skip-pose-export", action="store_true", help="Do not match INS ego poses or write pose.txt files.")
     p.add_argument(
         "--force-torch-pointrope",
         action="store_true",
@@ -51,6 +53,7 @@ def main() -> None:
         print(json.dumps(plan.__dict__, ensure_ascii=False, indent=2))
         return
 
+    ins_path = _resolve_ins_path(args.input_dir, args.ins_path, args.skip_pose_export)
     try:
         results = run_litept_inference(
             litept_root=args.litept_root,
@@ -64,6 +67,8 @@ def main() -> None:
             max_frames=args.max_frames,
             device=args.device,
             force_torch_pointrope=args.force_torch_pointrope,
+            ins_path=ins_path,
+            skip_pose_export=args.skip_pose_export,
         )
     except LitePTUnavailableError as exc:
         raise SystemExit(str(exc)) from exc
@@ -78,6 +83,15 @@ def main() -> None:
             indent=2,
         )
     )
+
+
+def _resolve_ins_path(input_dir: str, ins_path: str | None, skip_pose_export: bool) -> str | None:
+    if skip_pose_export:
+        return None
+    if ins_path:
+        return ins_path
+    candidate = Path(input_dir) / "ins"
+    return str(candidate) if candidate.exists() else None
 
 
 if __name__ == "__main__":

@@ -65,6 +65,9 @@ PYTHONPATH=src python scripts/run_litept_inference.py \
 
 `scripts/run_litept_inference.py` is currently a stub for the next integration step. The semantic class ids
 and noise groups live in `configs/classes.yaml`.
+If `./data/ins` exists, each frame is matched to the nearest INS row by timestamp and exported with
+`pose.txt` in KITTI 3x4 pose format plus `ego_pose` metadata. Use `--ins-path /path/to/ins` to pass a
+different INS file or `--skip-pose-export` to skip pose matching on repeated runs.
 By default, NuScenes uses `../LitePT/configs/nuscenes/semseg-litept-small-v1m1.py` and
 `../LitePT/pth/nuscenes/model_best.pth`. To run the Waymo preset, switch the dataset and output dir:
 

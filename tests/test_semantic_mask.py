@@ -60,3 +60,29 @@ def test_export_semantic_segmentation_result(tmp_path):
     assert np.array_equal(loaded_mask, mask)
     assert np.allclose(loaded_confidence, confidence)
     assert loaded_metadata["pseudo_label_version"] == "litept_v0"
+
+
+def test_export_semantic_segmentation_result_writes_pose_file(tmp_path):
+    mask = np.zeros((H, W), dtype=np.uint16)
+    result = SemanticSegmentationResult(
+        frame_id="frame_000",
+        semantic_mask=mask,
+        metadata={
+            "ego_pose": {
+                "timestamp_us": 100,
+                "source_timestamp_us": 101,
+                "delta_us": 1,
+                "translation": [1.0, 2.0, 3.0],
+                "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                "kitti_pose": [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 3.0],
+            }
+        },
+    )
+
+    metadata = export_semantic_segmentation_result(str(tmp_path), result)
+
+    pose_path = tmp_path / "frame_000" / "pose.txt"
+    loaded_metadata = json.loads((tmp_path / "frame_000" / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["pose"] == str(pose_path)
+    assert loaded_metadata["pose"] == str(pose_path)
+    assert len(pose_path.read_text(encoding="utf-8").strip().split()) == 12

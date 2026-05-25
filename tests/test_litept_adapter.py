@@ -1,9 +1,13 @@
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from autolabeler.data.bin_loader import H, W
+from autolabeler.data.schemas import OrganizedLiDARFrame
+import autolabeler.teachers.litept_adapter as litept_adapter
 from autolabeler.teachers.litept_adapter import (
+    LitePTModelBundle,
     LitePTUnavailableError,
     build_litept_inference_plan,
     run_litept_inference,
@@ -81,3 +85,72 @@ def test_litept_runtime_reports_unwired_external_repo(tmp_path: Path):
             output_dir=str(tmp_path / "out"),
             input_format="bin",
         )
+
+
+def test_litept_runtime_adds_nearest_ins_pose_metadata(tmp_path: Path, monkeypatch):
+    litept_root = tmp_path / "LitePT"
+    litept_root.mkdir()
+    config_path = litept_root / "configs" / "nuscenes"
+    config_path.mkdir(parents=True)
+    (config_path / "semseg-litept-small-v1m1.py").write_text("# config\n", encoding="utf-8")
+    checkpoint_path = litept_root / "pth" / "nuscenes"
+    checkpoint_path.mkdir(parents=True)
+    (checkpoint_path / "model_best.pth").write_bytes(b"checkpoint")
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "frame_000.bin").write_bytes(bytes(H * W * 4 * 4))
+    ins_path = data_dir / "ins"
+    ins_path.write_text(
+        "secs\tnsecs\tattitude_X\tattitude_Y\tattitude_Z\tlatitude\tlongitude\televation\tutmPosition_X\tutmPosition_Y\tutmPosition_Z\n"
+        "10\t100000000\t0\t0\t0\t55.0\t37.0\t150.0\t1\t2\t3\n"
+        "10\t300000000\t0\t0\t0\t55.0\t37.0\t150.0\t4\t5\t6\n",
+        encoding="utf-8",
+    )
+
+    def fake_load_litept_model(**kwargs):
+        return LitePTModelBundle(
+            model=object(),
+            cfg=object(),
+            device="cpu",
+            device_name="cpu",
+            device_capability=None,
+            num_classes=1,
+            class_names=["class_0"],
+            pointrope_backend="torch",
+            dataset_name="nuscenes",
+            config_file=kwargs["litept_config"],
+            checkpoint_file=kwargs["checkpoint"],
+        )
+
+    monkeypatch.setattr(litept_adapter, "_load_litept_model", fake_load_litept_model)
+    monkeypatch.setattr(
+        litept_adapter,
+        "load_frame",
+        lambda path, frame_id, input_format: OrganizedLiDARFrame(
+            frame_id=frame_id,
+            points_range=np.zeros((H, W, 4), dtype=np.float32),
+            points_flat=np.zeros((H * W, 4), dtype=np.float32),
+            timestamp_us=10_260_000,
+        ),
+    )
+    monkeypatch.setattr(
+        litept_adapter,
+        "_predict_frame",
+        lambda model, points_range: (np.zeros((H, W), dtype=np.uint16), np.ones((H, W), dtype=np.float32)),
+    )
+
+    results = run_litept_inference(
+        litept_root=str(litept_root),
+        checkpoint=None,
+        input_dir=str(data_dir),
+        output_dir=str(tmp_path / "out"),
+        input_format="bin",
+        ins_path=str(ins_path),
+        force_torch_pointrope=True,
+    )
+
+    pose = results[0].metadata["ego_pose"]
+    assert pose["source_timestamp_us"] == 10_300_000
+    assert pose["delta_us"] == 40_000
+    assert pose["translation"] == [4.0, 5.0, 6.0]
+    assert len(pose["kitti_pose"]) == 12
