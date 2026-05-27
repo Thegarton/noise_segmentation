@@ -95,6 +95,79 @@ PYTHONPATH=src python scripts/run_litept_inference.py \
   --dry-run
 ```
 
+## Camera/SAM3 teacher path
+
+The camera teacher is an offline data-engine step. It is used to create better training labels; the
+eventual student model still uses LiDAR only at inference time.
+
+Install OpenCV support in the env used for video extraction and projection QA:
+
+```bash
+pip install -e ".[camera]"
+```
+
+Extract synced camera frames from a video. The script matches each LiDAR CSV timestamp to the nearest
+row in the video timestamp CSV and writes `data/<frame_id>.jpg` plus `camera_frame_manifest.json`.
+Frames farther than `--max-delta-ms` are marked unsynced and are not saved as hard matches.
+
+```bash
+PYTHONPATH=src python scripts/prepare_camera_frames.py \
+  --lidar-dir ./data \
+  --video ./camera.mp4 \
+  --video-timestamps-csv ./video_timestamps.csv \
+  --video-frame-index-col frame_index \
+  --video-timestamp-col timestamp \
+  --timestamp-unit us \
+  --out-dir ./data
+```
+
+Check LiDAR-to-camera calibration before using SAM3 output. The projection script writes
+`point_to_pixel.npy`, `point_camera_depth.npy`, and a `projection_overlay.jpg` for visual inspection.
+
+```bash
+PYTHONPATH=src python scripts/project_lidar_to_image.py \
+  --csv ./data/000009.csv \
+  --image ./data/000009.jpg \
+  --calibration-json ./camera_calibration.json \
+  --extrinsic-direction lidar_to_camera \
+  --out-dir ./out/projection
+```
+
+Run SAM3 from its own Conda environment through a file-based text-prompt wrapper. The external SAM3
+script must accept `--image`, `--prompts`, and `--output`, and write `.npz` files with
+`masks: bool[N,H,W]`, `scores: float[N]`, `labels: str[N]`, and `prompts: str[N]`.
+
+```bash
+PYTHONPATH=src python scripts/run_sam3_text_teacher.py \
+  --image-dir ./data \
+  --prompt-config configs/sam3_text_prompts_pointwise_v1.yaml \
+  --conda-env sam3 \
+  --sam3-script /path/to/run_sam3_text.py \
+  --out-dir ./out/sam3_text \
+  --validate
+```
+
+Fuse Waymo LitePT masks and SAM3 camera candidates into project-v1 point-wise seed labels. Residual
+points are not automatically converted to `noise`; ambiguous points stay background/ignore or go to review.
+
+```bash
+PYTHONPATH=src python scripts/fuse_pointwise_teachers.py \
+  --litept-output-dir ./out/litept_waymo \
+  --sam3-dir ./out/sam3_text \
+  --projection-dir ./out/projection \
+  --out-dir ./out/pointwise_teacher_v1
+```
+
+Build optional review masks for coarse `noise` labeling. These are candidate masks only, not hard labels:
+
+```bash
+PYTHONPATH=src python scripts/build_noise_review_candidates.py \
+  --csv ./data/000009.csv \
+  --semantic-mask ./out/pointwise_teacher_v1/000009/semantic_mask.npy \
+  --confidence ./out/pointwise_teacher_v1/000009/confidence.npy \
+  --out-dir ./out/noise_candidates
+```
+
 ## Point-wise segmentation visualization
 
 Install the optional PyVista viewer dependency:

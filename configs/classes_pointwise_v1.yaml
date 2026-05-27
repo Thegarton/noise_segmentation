@@ -1,0 +1,26 @@
+# Point-wise segmentation target ids for the first LiDAR-only student.
+semantic_classes:
+  background: 0
+  TRUCK_BUS: 1
+  CAR: 2
+  CYCLIST: 3
+  MOTORCYCLE: 4
+  PEDESTRIAN: 5
+  road: 6
+  triangular_traffic_sign: 7
+  thin_horizontal_bar: 8
+  thin_vertical_bar: 9
+  traffic_sign: 10
+  roadblock: 11
+  wheel_chock: 12
+  tire: 13
+  road_stud: 14
+  traffic_cone: 15
+  unknown_object: 16
+  noise: 17
+  ignore: 255
+
+noise_groups:
+  noise:
+    - noise
+

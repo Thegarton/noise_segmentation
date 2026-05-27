@@ -1,0 +1,25 @@
+source_to_target:
+  Car: CAR
+  car: CAR
+  Truck: TRUCK_BUS
+  truck: TRUCK_BUS
+  Bus: TRUCK_BUS
+  bus: TRUCK_BUS
+  Pedestrian: PEDESTRIAN
+  pedestrian: PEDESTRIAN
+  Cyclist: CYCLIST
+  cyclist: CYCLIST
+  Motorcyclist: MOTORCYCLE
+  motorcyclist: MOTORCYCLE
+  Motorcycle: MOTORCYCLE
+  motorcycle: MOTORCYCLE
+  Road: road
+  road: road
+  Traffic Sign: traffic_sign
+  traffic_sign: traffic_sign
+  Sign: traffic_sign
+  sign: traffic_sign
+  Traffic Cone: traffic_cone
+  traffic_cone: traffic_cone
+  Cone: traffic_cone
+  cone: traffic_cone
