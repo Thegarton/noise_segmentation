@@ -13,7 +13,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from autolabeler.camera.calibration import load_camera_calibration  # noqa: E402
+from autolabeler.camera.calibration import load_camera_calibration, parse_image_size  # noqa: E402
 from autolabeler.camera.projection import project_points_to_image, save_projection_arrays, save_projection_overlay  # noqa: E402
 from autolabeler.data.csv_loader import load_csv  # noqa: E402
 
@@ -24,7 +24,11 @@ def main() -> None:
     frame_id = args.frame_id or csv_path.stem
     frame = load_csv(str(csv_path), frame_id=frame_id)
     image_shape = read_image_shape(args.image)
-    calibration = load_camera_calibration(args.calibration_json, extrinsic_direction=args.extrinsic_direction)
+    calibration = load_camera_calibration(
+        args.calibration_json,
+        extrinsic_direction=args.extrinsic_direction,
+        source_image_shape=parse_image_size(args.calibration_image_size),
+    )
     point_to_pixel, depth, visible = project_points_to_image(
         frame.points_flat[:, :3],
         calibration,
@@ -42,12 +46,21 @@ def main() -> None:
         "frame_id": frame_id,
         "csv": str(csv_path),
         "image": str(Path(args.image)),
+        "image_size": [int(image_shape[1]), int(image_shape[0])],
         "calibration_json": str(Path(args.calibration_json)),
+        "calibration_image_size": (
+            [int(calibration.source_image_shape[1]), int(calibration.source_image_shape[0])]
+            if calibration.source_image_shape is not None
+            else None
+        ),
         "visible_points": int(np.count_nonzero(visible)),
         "point_count": int(frame.points_flat.shape[0]),
         **paths,
     }
-    (out_dir / "projection_metadata.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out_dir / "projection_metadata.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     print(json.dumps(summary, indent=2))
 
 
@@ -67,6 +80,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--csv", required=True, help="LiDAR frame CSV.")
     p.add_argument("--image", required=True, help="Synced camera image.")
     p.add_argument("--calibration-json", required=True)
+    p.add_argument(
+        "--calibration-image-size",
+        default=None,
+        help="WIDTHxHEIGHT image size that calibration K was computed for, e.g. 3840x2160. "
+        "Overrides image_size/calibration_image_size from the JSON.",
+    )
     p.add_argument("--extrinsic-direction", choices=["lidar_to_camera", "camera_to_lidar"], default="lidar_to_camera")
     p.add_argument("--out-dir", required=True)
     p.add_argument("--frame-id", default=None)
@@ -76,4 +95,3 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     main()
-

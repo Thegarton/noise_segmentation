@@ -27,7 +27,8 @@ def project_points_to_image(
     depth = camera_points[:, 2].astype(np.float32)
 
     valid = np.isfinite(camera_points).all(axis=1) & (depth > 0.0)
-    uvw = (calibration.K @ camera_points.T).T
+    K = calibration.K_for_image_shape(image_shape)
+    uvw = (K @ camera_points.T).T
     uv = np.full((points.shape[0], 2), INVALID_PIXEL, dtype=np.int32)
     projected_float = np.full((points.shape[0], 2), np.nan, dtype=np.float32)
 

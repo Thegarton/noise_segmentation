@@ -124,11 +124,35 @@ PYTHONPATH=src python scripts/prepare_camera_frames.py \
 Check LiDAR-to-camera calibration before using SAM3 output. The projection script writes
 `point_to_pixel.npy`, `point_camera_depth.npy`, and a `projection_overlay.jpg` for visual inspection.
 
+`project_lidar_to_image.py` expects a JSON camera calibration:
+
+```json
+{
+  "image_size": [3840, 2160],
+  "K": [[fx, 0, cx], [0, fy, cy], [0, 0, 1]],
+  "T_lidar_to_camera": [[...], [...], [...], [0, 0, 0, 1]]
+}
+```
+
+- `K` is the 3x3 intrinsic matrix for the image size in `image_size`.
+- `image_size` is `[width, height]` for the frame used during calibration, for example 4K `3840x2160`.
+- `T_lidar_to_camera` maps LiDAR xyz points into the camera coordinate frame. If your file contains
+  `T_camera_to_lidar`, run with `--extrinsic-direction camera_to_lidar` and the script will invert it.
+- The point_labeler RGB precompute uses a KITTI-style `rgb_calib*.txt` with `P2` and `Tr`; do not replace
+  this JSON with the labeler dataset `calib.txt`, which is only for scan poses.
+
+If the calibration was made for 4K but the synced frames are resized from the same camera, keep the original
+`image_size` in the JSON or pass `--calibration-image-size 3840x2160`. The code scales `fx`, `cx` by
+`actual_width / calibration_width` and `fy`, `cy` by `actual_height / calibration_height` before projection.
+This handles compressed/resized images, including non-uniform resize. It does not compensate for crops,
+letterboxing, or padding; those require adjusting the principal point before projection.
+
 ```bash
 PYTHONPATH=src python scripts/project_lidar_to_image.py \
   --csv ./data/000009.csv \
   --image ./data/000009.jpg \
   --calibration-json ./camera_calibration.json \
+  --calibration-image-size 3840x2160 \
   --extrinsic-direction lidar_to_camera \
   --out-dir ./out/projection
 ```

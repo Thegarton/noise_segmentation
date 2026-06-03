@@ -62,6 +62,31 @@ def test_camera_calibration_loads_and_projects_points(tmp_path: Path):
     assert visible.tolist() == [True, True, False]
 
 
+def test_camera_calibration_scales_intrinsics_to_resized_image(tmp_path: Path):
+    calib_path = tmp_path / "calib.json"
+    calib_path.write_text(
+        json.dumps(
+            {
+                "image_size": [20, 10],
+                "K": [[10.0, 0.0, 10.0], [0.0, 10.0, 4.0], [0.0, 0.0, 1.0]],
+                "T_lidar_to_camera": np.eye(4).tolist(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    calibration = load_camera_calibration(calib_path, extrinsic_direction="lidar_to_camera")
+    pixels, _, visible = project_points_to_image(
+        np.asarray([[0.0, 0.0, 1.0], [0.2, 0.0, 1.0]], dtype=np.float32),
+        calibration,
+        image_shape=(5, 10),
+        use_z_buffer=False,
+    )
+
+    assert pixels.tolist() == [[5, 2], [6, 2]]
+    assert visible.tolist() == [True, True]
+
+
 def test_sam3_prompt_config_and_npz_validation(tmp_path: Path):
     prompt_path = tmp_path / "prompts.yaml"
     prompt_path.write_text('traffic_sign:\n  - "traffic sign"\nCAR: ["car", "passenger car"]\n', encoding="utf-8")
