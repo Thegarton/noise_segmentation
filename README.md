@@ -53,7 +53,7 @@ LitePT integration is intentionally isolated from the lightweight core package. 
 conda environment:
 
 ```bash
-conda activate LItePT
+conda activate litept
 PYTHONPATH=src python scripts/run_litept_inference.py \
   --litept-root ../LitePT \
   --input-dir ./data \
@@ -124,7 +124,7 @@ PYTHONPATH=src python scripts/finetune_litept.py \
 Run preparation and training inside the LitePT CUDA environment:
 
 ```bash
-conda activate LItePT
+conda activate litept
 PYTHONPATH=src python scripts/finetune_litept.py \
   --litept-root ../LitePT \
   --export-dir /path/to/corrected_masks \
@@ -133,7 +133,8 @@ PYTHONPATH=src python scripts/finetune_litept.py \
   --epochs 30 \
   --batch-size 4 \
   --num-workers 4 \
-  --num-gpus 1
+  --num-gpus 1 \
+  --force-torch-pointrope
 ```
 
 By default the script loads `../LitePT/pth/waymo/model_best.pth`, removes only its old `seg_head`, initializes
@@ -142,10 +143,16 @@ to select another Waymo-compatible checkpoint, `--prepare-only` to stop before t
 replace a previous generated run, or `--resume` to continue from
 `<output-dir>/experiment/model/model_last.pth`.
 
+`--force-torch-pointrope` replaces LitePT's compiled PointROPE CUDA extension with its PyTorch implementation.
+Use it when training fails on the first batch with `CUDA error: no kernel image is available for execution on
+the device`. This fallback is slower, but does not require rebuilding PointROPE for the GPU's compute
+capability.
+
 Generated artifacts include:
 
 - `dataset/{train,val}/<frame>/{coord.npy,strength.npy,segment.npy}`
 - `litept_custom_config.py`
+- `train_litept_custom.py`
 - `pretrained_backbone.pth`
 - `taxonomy.json`, `class_statistics.json`, and `run_manifest.json`
 - `experiment/model/model_best.pth`

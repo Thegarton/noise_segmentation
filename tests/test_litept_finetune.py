@@ -150,6 +150,34 @@ def test_prepare_builds_default_dataset_config_and_statistics(tmp_path: Path, mo
     assert "resume=false" in command
 
 
+def test_force_torch_pointrope_uses_generated_training_launcher(tmp_path: Path, monkeypatch):
+    litept_root, labeler_dir, export_dir = make_finetune_inputs(tmp_path)
+    output_dir = tmp_path / "finetune"
+    plan = build_finetune_plan(
+        litept_root=str(litept_root),
+        export_dir=str(export_dir),
+        labeler_dir=str(labeler_dir),
+        output_dir=str(output_dir),
+        force_torch_pointrope=True,
+    )
+
+    def fake_prepare_checkpoint(source: Path, destination: Path) -> list[str]:
+        destination.write_bytes(b"backbone")
+        return ["seg_head.weight", "seg_head.bias"]
+
+    monkeypatch.setattr(litept_finetune, "prepare_backbone_checkpoint", fake_prepare_checkpoint)
+    prepare_finetune_run(plan)
+
+    launcher_path = output_dir / "train_litept_custom.py"
+    launcher = launcher_path.read_text(encoding="utf-8")
+    compile(launcher, str(launcher_path), "exec")
+    assert 'sys.modules["libs.pointrope"] = pointrope_package' in launcher
+    assert "LitePT training PointROPE backend: torch" in launcher
+
+    command = build_training_command(plan)
+    assert command[:2] == [sys.executable, str(launcher_path)]
+
+
 def test_filter_checkpoint_removes_only_segmentation_head():
     state_dict = OrderedDict(
         [

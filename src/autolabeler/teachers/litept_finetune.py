@@ -21,6 +21,7 @@ IGNORE_TRAINING_ID = -1
 DEFAULT_OUTPUT_IGNORE_ID = 255
 GENERATED_FILES = (
     "litept_custom_config.py",
+    "train_litept_custom.py",
     "pretrained_backbone.pth",
     "run_manifest.json",
     "taxonomy.json",
@@ -73,6 +74,7 @@ class LitePTFinetunePlan:
     grid_size: float
     head_lr: float
     backbone_lr: float
+    force_torch_pointrope: bool
 
     def to_jsonable(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -98,6 +100,7 @@ def build_finetune_plan(
     grid_size: float = 0.05,
     head_lr: float = 2e-4,
     backbone_lr: float = 2e-5,
+    force_torch_pointrope: bool = False,
 ) -> LitePTFinetunePlan:
     _validate_training_options(
         epochs=epochs,
@@ -164,6 +167,7 @@ def build_finetune_plan(
         grid_size=grid_size,
         head_lr=head_lr,
         backbone_lr=backbone_lr,
+        force_torch_pointrope=force_torch_pointrope,
     )
 
 
@@ -399,6 +403,8 @@ def prepare_finetune_run(
     )
     config_path = Path(plan.config_path)
     config_path.write_text(render_litept_config(plan), encoding="utf-8")
+    launcher_path = output_dir / "train_litept_custom.py"
+    launcher_path.write_text(render_training_launcher(plan), encoding="utf-8")
     backbone_path = output_dir / "pretrained_backbone.pth"
     removed_keys = prepare_backbone_checkpoint(checkpoint, backbone_path)
 
@@ -407,6 +413,7 @@ def prepare_finetune_run(
         {
             "prepared": True,
             "pretrained_backbone": str(backbone_path),
+            "training_launcher": str(launcher_path),
             "removed_checkpoint_keys": removed_keys,
             "taxonomy_path": str(taxonomy_path),
             "class_statistics": str(output_dir / "class_statistics.json"),
@@ -595,6 +602,42 @@ hooks = [
 '''
 
 
+def render_training_launcher(plan: LitePTFinetunePlan) -> str:
+    litept_root = str(Path(plan.litept_root))
+    train_script = str(Path(plan.litept_root) / "tools" / "train.py")
+    pointrope_module = str(Path(plan.litept_root) / "libs" / "pointrope" / "pointrope_torch.py")
+    return f'''#!/usr/bin/env python3
+import importlib.util
+import runpy
+import sys
+import types
+
+LITEPT_ROOT = {litept_root!r}
+TRAIN_SCRIPT = {train_script!r}
+POINTROPE_MODULE = {pointrope_module!r}
+
+if LITEPT_ROOT not in sys.path:
+    sys.path.insert(0, LITEPT_ROOT)
+
+if {plan.force_torch_pointrope!r}:
+    spec = importlib.util.spec_from_file_location("_finetune_pointrope_torch", POINTROPE_MODULE)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load PointROPE fallback from: {{POINTROPE_MODULE}}")
+    pointrope_torch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pointrope_torch)
+
+    pointrope_package = types.ModuleType("libs.pointrope")
+    pointrope_package.PointROPE = pointrope_torch.PointROPE
+    pointrope_package.__all__ = ["PointROPE"]
+    pointrope_package.__file__ = POINTROPE_MODULE
+    sys.modules["libs.pointrope"] = pointrope_package
+    print(f"LitePT training PointROPE backend: torch ({{POINTROPE_MODULE}})", flush=True)
+
+sys.argv[0] = TRAIN_SCRIPT
+runpy.run_path(TRAIN_SCRIPT, run_name="__main__")
+'''
+
+
 def filter_seg_head_state_dict(state_dict: dict[str, Any]) -> tuple[OrderedDict, list[str]]:
     filtered = OrderedDict()
     removed: list[str] = []
@@ -613,7 +656,11 @@ def prepare_backbone_checkpoint(source: Path, destination: Path) -> list[str]:
     except ImportError as exc:  # pragma: no cover - depends on LitePT environment
         raise RuntimeError(
             "PyTorch is required to prepare the pretrained backbone. "
-            "Run finetune_litept.py inside the LitePT environment."
+            "Run finetune_litept.py with the same Python interpreter that successfully runs LitePT inference. "
+            f"python={sys.executable} import_error={type(exc).__name__}: {exc}. "
+            "Check both interpreters with: "
+            "'python3 -c \"import sys, torch; print(sys.executable, torch.__version__)\"' and "
+            f"'{sys.executable} -c \"import sys, torch; print(sys.executable, torch.__version__)\"'."
         ) from exc
 
     try:
@@ -649,9 +696,17 @@ def build_training_command(plan: LitePTFinetunePlan, *, resume: bool = False) ->
         if not weight.is_file():
             raise FileNotFoundError(f"Prepared backbone checkpoint does not exist: {weight}")
 
+    train_entrypoint = (
+        Path(plan.output_dir) / "train_litept_custom.py"
+        if plan.force_torch_pointrope
+        else Path(plan.litept_root) / "tools" / "train.py"
+    )
+    if plan.force_torch_pointrope and not train_entrypoint.is_file():
+        raise FileNotFoundError(f"Generated LitePT training launcher does not exist: {train_entrypoint}")
+
     return [
         sys.executable,
-        str(Path(plan.litept_root) / "tools" / "train.py"),
+        str(train_entrypoint),
         "--config-file",
         str(config_path),
         "--num-gpus",

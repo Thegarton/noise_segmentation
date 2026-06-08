@@ -35,6 +35,7 @@ def main() -> None:
             grid_size=args.grid_size,
             head_lr=args.head_lr,
             backbone_lr=args.backbone_lr,
+            force_torch_pointrope=args.force_torch_pointrope,
         )
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
@@ -101,6 +102,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grid-size", type=float, default=0.05)
     parser.add_argument("--head-lr", type=float, default=2e-4)
     parser.add_argument("--backbone-lr", type=float, default=2e-5)
+    parser.add_argument(
+        "--force-torch-pointrope",
+        action="store_true",
+        help="Use LitePT's pure PyTorch PointROPE fallback during training",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate inputs without writing files or importing torch")
     parser.add_argument("--prepare-only", action="store_true", help="Prepare data/config/checkpoint without starting training")
     parser.add_argument("--overwrite", action="store_true", help="Replace generated data and experiment output")
