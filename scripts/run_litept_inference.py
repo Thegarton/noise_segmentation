@@ -17,14 +17,18 @@ def main() -> None:
     p.add_argument("--litept-root", required=True, help="Path to the cloned LitePT repository")
     p.add_argument("--input-dir", required=True)
     p.add_argument("--input-format", choices=["auto", "bin", "csv"], default="auto")
-    p.add_argument("--litept-dataset", choices=["nuscenes", "waymo"], default="nuscenes")
-    p.add_argument("--checkpoint", default=None, help="Optional checkpoint override. Defaults to pth/<dataset>/model_best.pth")
+    p.add_argument("--litept-dataset", choices=["nuscenes", "waymo", "custom"], default="nuscenes")
+    p.add_argument(
+        "--checkpoint",
+        default=None,
+        help="Optional checkpoint override. Required for custom; otherwise defaults to pth/<dataset>/model_best.pth",
+    )
     p.add_argument("--output-dir", required=True)
     p.add_argument("--config", default="configs/classes.yaml")
     p.add_argument(
         "--litept-config",
         default=None,
-        help="Optional LitePT-native config override. Defaults to configs/<dataset>/semseg-litept-small-v1m1.py",
+        help="LitePT-native config override. Required for custom; otherwise uses the dataset preset.",
     )
     p.add_argument("--max-frames", type=int, default=None, help="Process only the first N frames")
     p.add_argument("--device", default=None, help="Torch device, e.g. cuda, cuda:1, or cpu")

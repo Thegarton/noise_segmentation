@@ -10,6 +10,7 @@ from autolabeler.teachers.litept_adapter import (
     LitePTModelBundle,
     LitePTUnavailableError,
     build_litept_inference_plan,
+    remap_training_predictions,
     run_litept_inference,
 )
 
@@ -66,6 +67,31 @@ def test_litept_plan_rejects_missing_root(tmp_path: Path):
             output_dir=str(tmp_path / "out"),
             validate_checkpoint=False,
         )
+
+
+def test_custom_litept_requires_explicit_config_and_checkpoint(tmp_path: Path):
+    litept_root = tmp_path / "LitePT"
+    litept_root.mkdir()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "frame_000.bin").write_bytes(bytes(H * W * 4 * 4))
+
+    with pytest.raises(ValueError, match="--checkpoint is required"):
+        build_litept_inference_plan(
+            litept_root=str(litept_root),
+            checkpoint=None,
+            input_dir=str(data_dir),
+            output_dir=str(tmp_path / "out"),
+            litept_dataset="custom",
+            validate_checkpoint=False,
+        )
+
+
+def test_custom_predictions_are_remapped_to_source_taxonomy_ids():
+    labels = np.asarray([0, 1, 0, 2], dtype=np.int64)
+    assert remap_training_predictions(labels, [2, 10, 42]).tolist() == [2, 10, 2, 42]
+    with pytest.raises(ValueError, match="outside"):
+        remap_training_predictions(np.asarray([3]), [2, 10, 42])
 
 
 def test_litept_runtime_reports_unwired_external_repo(tmp_path: Path):

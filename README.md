@@ -63,8 +63,7 @@ PYTHONPATH=src python scripts/run_litept_inference.py \
   --config configs/classes.yaml
 ```
 
-`scripts/run_litept_inference.py` is currently a stub for the next integration step. The semantic class ids
-and noise groups live in `configs/classes.yaml`.
+The semantic class ids and noise groups live in `configs/classes.yaml`.
 If `./data/ins` exists, each frame is matched to the nearest INS row by timestamp and exported with
 `pose.txt` in KITTI 3x4 pose format plus `ego_pose` metadata. Use `--ins-path /path/to/ins` to pass a
 different INS file or `--skip-pose-export` to skip pose matching on repeated runs.
@@ -94,6 +93,78 @@ PYTHONPATH=src python scripts/run_litept_inference.py \
   --output-dir ./out/litept_waymo \
   --dry-run
 ```
+
+## Fine-tune LitePT on point_labeler labels
+
+First export the corrected masks from `point_labeler`:
+
+```bash
+python3 ../point_labeler/scripts/export_from_point_labeler.py \
+  --labeler-dir /path/to/labeler_dataset \
+  --out-dir /path/to/corrected_masks
+```
+
+The fine-tuning script reads the masks from that export and the matching XYZI point clouds and current
+taxonomy from the original labeler dataset. Arbitrary class ids are converted to dense LitePT training ids;
+`ignore`/id `255` and unknown ids are excluded from the loss. The mapping back to the original ids is written
+to `taxonomy.json`.
+
+Validate all frame pairs, taxonomy, shapes, and the deterministic last-20-percent validation split without
+importing PyTorch:
+
+```bash
+PYTHONPATH=src python scripts/finetune_litept.py \
+  --litept-root ../LitePT \
+  --export-dir /path/to/corrected_masks \
+  --labeler-dir /path/to/labeler_dataset \
+  --output-dir ./out/litept_custom \
+  --dry-run
+```
+
+Run preparation and training inside the LitePT CUDA environment:
+
+```bash
+conda activate LItePT
+PYTHONPATH=src python scripts/finetune_litept.py \
+  --litept-root ../LitePT \
+  --export-dir /path/to/corrected_masks \
+  --labeler-dir /path/to/labeler_dataset \
+  --output-dir ./out/litept_custom \
+  --epochs 30 \
+  --batch-size 4 \
+  --num-workers 4 \
+  --num-gpus 1
+```
+
+By default the script loads `../LitePT/pth/waymo/model_best.pth`, removes only its old `seg_head`, initializes
+a new head for the custom taxonomy, and fine-tunes the backbone at a lower learning rate. Use `--checkpoint`
+to select another Waymo-compatible checkpoint, `--prepare-only` to stop before training, `--overwrite` to
+replace a previous generated run, or `--resume` to continue from
+`<output-dir>/experiment/model/model_last.pth`.
+
+Generated artifacts include:
+
+- `dataset/{train,val}/<frame>/{coord.npy,strength.npy,segment.npy}`
+- `litept_custom_config.py`
+- `pretrained_backbone.pth`
+- `taxonomy.json`, `class_statistics.json`, and `run_manifest.json`
+- `experiment/model/model_best.pth`
+
+Run the fine-tuned model while preserving the original point_labeler ids:
+
+```bash
+PYTHONPATH=src python scripts/run_litept_inference.py \
+  --litept-root ../LitePT \
+  --input-dir /path/to/organized_frames \
+  --input-format csv \
+  --litept-dataset custom \
+  --litept-config ./out/litept_custom/litept_custom_config.py \
+  --checkpoint ./out/litept_custom/experiment/model/model_best.pth \
+  --output-dir ./out/litept_custom_predictions
+```
+
+The custom config stores `training_id_to_source_id`; inference applies it before writing
+`semantic_mask.npy` and includes exact `semantic_classes` in every `metadata.json`.
 
 ## Camera/SAM3 teacher path
 

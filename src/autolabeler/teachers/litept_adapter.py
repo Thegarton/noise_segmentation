@@ -48,6 +48,8 @@ class LitePTModelBundle:
     dataset_name: str
     config_file: str
     checkpoint_file: str
+    training_id_to_source_id: list[int] | None = None
+    output_ignore_index: int = 255
 
 
 def build_litept_inference_plan(
@@ -71,7 +73,7 @@ def build_litept_inference_plan(
 
     dataset = _validate_litept_dataset(litept_dataset)
     ckpt = _resolve_litept_checkpoint(root, dataset, checkpoint)
-    if validate_checkpoint and not ckpt.exists():
+    if (validate_checkpoint or dataset == "custom") and not ckpt.exists():
         raise FileNotFoundError(f"LitePT checkpoint does not exist: {ckpt}")
     config_file = _resolve_litept_config(root, dataset, litept_config, validate_exists=False)
 
@@ -139,6 +141,7 @@ def run_litept_inference(
     )
 
     results: list[SemanticSegmentationResult] = []
+    training_id_to_source_id = model.training_id_to_source_id or list(range(model.num_classes))
     for record in records:
         frame = load_frame(record.lidar_path, record.frame_id, input_format=input_format)
         pose_metadata = _pose_metadata(frame.timestamp_us, pose_index)
@@ -157,7 +160,12 @@ def run_litept_inference(
                     "checkpoint": model.checkpoint_file,
                     "class_names": model.class_names,
                     "num_classes": model.num_classes,
-                    "ignore_index": 255,
+                    "semantic_classes": {
+                        name: source_id
+                        for name, source_id in zip(model.class_names, training_id_to_source_id)
+                    },
+                    "training_id_to_source_id": training_id_to_source_id,
+                    "ignore_index": model.output_ignore_index,
                     "device": str(model.device),
                     "device_name": model.device_name,
                     "device_capability": model.device_capability,
@@ -250,6 +258,18 @@ def _load_litept_model(
     num_classes = int(getattr(getattr(cfg, "data", {}), "num_classes", getattr(cfg.model, "num_classes", 0)))
     if not class_names:
         class_names = [f"class_{i}" for i in range(num_classes)]
+    training_id_to_source_id = list(getattr(cfg, "training_id_to_source_id", range(num_classes)))
+    if len(training_id_to_source_id) != num_classes:
+        raise LitePTUnavailableError(
+            f"training_id_to_source_id must contain {num_classes} ids, got {len(training_id_to_source_id)} "
+            f"in config: {config_file}"
+        )
+    training_id_to_source_id = [int(value) for value in training_id_to_source_id]
+    output_ignore_index = int(getattr(cfg, "output_ignore_index", 255))
+    if any(value < 0 or value > np.iinfo(np.uint16).max for value in training_id_to_source_id):
+        raise LitePTUnavailableError("training_id_to_source_id values must fit uint16")
+    if output_ignore_index < 0 or output_ignore_index > np.iinfo(np.uint16).max:
+        raise LitePTUnavailableError("output_ignore_index must fit uint16")
 
     return LitePTModelBundle(
         model=model,
@@ -263,6 +283,8 @@ def _load_litept_model(
         dataset_name=dataset,
         config_file=str(config_file),
         checkpoint_file=str(checkpoint_file),
+        training_id_to_source_id=training_id_to_source_id,
+        output_ignore_index=output_ignore_index,
     )
 
 
@@ -343,14 +365,14 @@ def _predict_frame(model: LitePTModelBundle, points_range: np.ndarray) -> tuple[
     )
     valid_indices = np.flatnonzero(valid)
 
-    semantic_flat = np.full((H * W,), 255, dtype=np.uint16)
+    semantic_flat = np.full((H * W,), model.output_ignore_index, dtype=np.uint16)
     confidence_flat = np.zeros((H * W,), dtype=np.float32)
     if valid_indices.size == 0:
         return semantic_flat.reshape(H, W), confidence_flat.reshape(H, W)
 
     data_dict = {
         "coord": flat[valid_indices, :3].astype(np.float32, copy=False),
-        "strength": _normalize_strength(flat[valid_indices, 3]).reshape(-1, 1),
+        "strength": normalize_litept_strength(flat[valid_indices, 3]).reshape(-1, 1),
         "segment": np.full((valid_indices.size,), -1, dtype=np.int64),
         "index_valid_keys": ["coord", "strength", "segment"],
     }
@@ -379,19 +401,23 @@ def _predict_frame(model: LitePTModelBundle, points_range: np.ndarray) -> tuple[
 
     pred = pred / counts.clamp_min(1.0)
     confidence, labels = pred.max(dim=1)
-    semantic_flat[valid_indices] = labels.detach().cpu().numpy().astype(np.uint16)
+    labels_numpy = labels.detach().cpu().numpy().astype(np.int64)
+    training_id_to_source_id = model.training_id_to_source_id or list(range(model.num_classes))
+    semantic_flat[valid_indices] = remap_training_predictions(labels_numpy, training_id_to_source_id)
     confidence_flat[valid_indices] = confidence.detach().cpu().numpy().astype(np.float32)
     return semantic_flat.reshape(H, W), confidence_flat.reshape(H, W)
 
 
 def _validate_litept_dataset(litept_dataset: str) -> str:
-    if litept_dataset not in {"nuscenes", "waymo"}:
-        raise ValueError(f"Unsupported LitePT dataset: {litept_dataset}. Expected one of: nuscenes, waymo")
+    if litept_dataset not in {"nuscenes", "waymo", "custom"}:
+        raise ValueError(f"Unsupported LitePT dataset: {litept_dataset}. Expected one of: nuscenes, waymo, custom")
     return litept_dataset
 
 
 def _resolve_litept_checkpoint(root: Path, litept_dataset: str, checkpoint: str | None) -> Path:
     if checkpoint is None:
+        if litept_dataset == "custom":
+            raise ValueError("--checkpoint is required when --litept-dataset custom")
         return (root / "pth" / litept_dataset / "model_best.pth").resolve()
     return Path(checkpoint).expanduser().resolve()
 
@@ -404,11 +430,13 @@ def _resolve_litept_config(
     validate_exists: bool = True,
 ) -> Path:
     if litept_config is None:
+        if litept_dataset == "custom":
+            raise ValueError("--litept-config is required when --litept-dataset custom")
         path = root / "configs" / litept_dataset / "semseg-litept-small-v1m1.py"
     else:
         candidate = Path(litept_config).expanduser()
         path = candidate if candidate.is_absolute() else root / candidate
-    if validate_exists and (not path.exists() or not path.is_file()):
+    if (validate_exists or litept_dataset == "custom") and (not path.exists() or not path.is_file()):
         raise FileNotFoundError(f"LitePT config does not exist: {path}")
     return path.resolve()
 
@@ -462,12 +490,29 @@ def _normalize_state_dict_keys(state_dict: OrderedDict, model_keys) -> OrderedDi
     return state_dict
 
 
-def _normalize_strength(intensity: np.ndarray) -> np.ndarray:
+def normalize_litept_strength(intensity: np.ndarray) -> np.ndarray:
     strength = np.asarray(intensity, dtype=np.float32)
     finite = np.isfinite(strength)
     if finite.any() and float(np.nanmax(strength[finite])) > 1.5:
         strength = strength / 255.0
     return strength.astype(np.float32, copy=False)
+
+
+def remap_training_predictions(labels: np.ndarray, training_id_to_source_id: list[int]) -> np.ndarray:
+    training_labels = np.asarray(labels)
+    if not np.issubdtype(training_labels.dtype, np.integer):
+        raise ValueError(f"Training predictions must have integer dtype, got {training_labels.dtype}")
+    source_ids = np.asarray(training_id_to_source_id, dtype=np.uint16)
+    if training_labels.size and (
+        int(training_labels.min()) < 0 or int(training_labels.max()) >= source_ids.size
+    ):
+        raise ValueError(
+            f"Training predictions contain ids outside [0, {source_ids.size - 1}]"
+        )
+    return source_ids[training_labels]
+
+
+_normalize_strength = normalize_litept_strength
 
 
 def _candidate_entrypoints(root: Path) -> list[str]:
