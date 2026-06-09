@@ -86,10 +86,21 @@ def test_sparse_taxonomy_and_unknown_labels_map_to_dense_training_ids():
     assert remap_source_labels(labels, {2: 0, 10: 1}).tolist() == [0, 1, -1, -1]
 
 
-def test_split_uses_last_twenty_percent_and_requires_two_frames():
-    train, val = split_frame_ids([f"frame_{index}" for index in range(10)], val_ratio=0.2)
-    assert train == [f"frame_{index}" for index in range(8)]
-    assert val == ["frame_8", "frame_9"]
+def test_split_randomly_selects_validation_frames_deterministically():
+    frame_ids = [f"frame_{index:03d}" for index in range(10)]
+    train, val = split_frame_ids(frame_ids, val_ratio=0.2, seed=42)
+    repeated_train, repeated_val = split_frame_ids(
+        list(reversed(frame_ids)),
+        val_ratio=0.2,
+        seed=42,
+    )
+    other_train, other_val = split_frame_ids(frame_ids, val_ratio=0.2, seed=7)
+
+    assert train == repeated_train
+    assert val == repeated_val == ["frame_005", "frame_006"]
+    assert other_val == ["frame_000", "frame_008"]
+    assert other_train != train
+    assert sorted(train + val) == frame_ids
     with pytest.raises(ValueError, match="At least 2 frames"):
         split_frame_ids(["only"], val_ratio=0.2)
 

@@ -124,7 +124,7 @@ def build_finetune_plan(
     labels_xml = labeler_path / "labels.xml"
     taxonomy = build_training_taxonomy(read_labels_xml(labels_xml))
     frame_ids = discover_exported_frame_ids(export_path)
-    train_ids, val_ids = split_frame_ids(frame_ids, val_ratio=val_ratio)
+    train_ids, val_ids = split_frame_ids(frame_ids, val_ratio=val_ratio, seed=seed)
     split_by_id = {frame_id: "train" for frame_id in train_ids}
     split_by_id.update({frame_id: "val" for frame_id in val_ids})
 
@@ -274,14 +274,23 @@ def discover_exported_frame_ids(export_dir: Path) -> list[str]:
     return frame_ids
 
 
-def split_frame_ids(frame_ids: list[str], *, val_ratio: float) -> tuple[list[str], list[str]]:
+def split_frame_ids(
+    frame_ids: list[str],
+    *,
+    val_ratio: float,
+    seed: int = 42,
+) -> tuple[list[str], list[str]]:
     if len(frame_ids) < 2:
         raise ValueError("At least 2 frames are required for train/validation split")
     if not 0.0 < val_ratio < 1.0:
         raise ValueError(f"val_ratio must be between 0 and 1, got {val_ratio}")
     ordered = sorted(frame_ids)
     val_count = min(len(ordered) - 1, max(1, int(math.ceil(len(ordered) * val_ratio))))
-    return ordered[:-val_count], ordered[-val_count:]
+    shuffled_indices = np.random.default_rng(seed).permutation(len(ordered))
+    val_indices = set(int(index) for index in shuffled_indices[:val_count])
+    train = [frame_id for index, frame_id in enumerate(ordered) if index not in val_indices]
+    val = [frame_id for index, frame_id in enumerate(ordered) if index in val_indices]
+    return train, val
 
 
 def inspect_finetune_frame(

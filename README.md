@@ -109,8 +109,8 @@ taxonomy from the original labeler dataset. Arbitrary class ids are converted to
 `ignore`/id `255` and unknown ids are excluded from the loss. The mapping back to the original ids is written
 to `taxonomy.json`.
 
-Validate all frame pairs, taxonomy, shapes, and the deterministic last-20-percent validation split without
-importing PyTorch:
+Validate all frame pairs, taxonomy, shapes, and the deterministic random validation split without importing
+PyTorch:
 
 ```bash
 PYTHONPATH=src python scripts/finetune_litept.py \
@@ -142,6 +142,9 @@ a new head for the custom taxonomy, and fine-tunes the backbone at a lower learn
 to select another Waymo-compatible checkpoint, `--prepare-only` to stop before training, `--overwrite` to
 replace a previous generated run, or `--resume` to continue from
 `<output-dir>/experiment/model/model_last.pth`.
+
+Frames are randomly assigned to train and validation according to `--val-ratio` (default `0.2`). The split is
+reproducible: `--seed 42` is the default, and changing `--seed` produces another random split.
 
 `--force-torch-pointrope` replaces LitePT's compiled PointROPE CUDA extension with its PyTorch implementation.
 Use it when training fails on the first batch with `CUDA error: no kernel image is available for execution on
