@@ -35,6 +35,9 @@ def main() -> None:
             grid_size=args.grid_size,
             head_lr=args.head_lr,
             backbone_lr=args.backbone_lr,
+            class_weighting=args.class_weighting,
+            max_class_weight=args.max_class_weight,
+            noise_frame_repeat=args.noise_frame_repeat,
             force_torch_pointrope=args.force_torch_pointrope,
         )
     except (FileNotFoundError, ValueError) as exc:
@@ -102,6 +105,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grid-size", type=float, default=0.05)
     parser.add_argument("--head-lr", type=float, default=2e-4)
     parser.add_argument("--backbone-lr", type=float, default=2e-5)
+    parser.add_argument(
+        "--class-weighting",
+        choices=("sqrt_inverse", "none"),
+        default="sqrt_inverse",
+        help="CrossEntropy class weighting computed from valid training points",
+    )
+    parser.add_argument(
+        "--max-class-weight",
+        type=float,
+        default=10.0,
+        help="Cap used by inverse-square-root class weighting",
+    )
+    parser.add_argument(
+        "--noise-frame-repeat",
+        type=int,
+        default=4,
+        help="How many times to include train frames containing classes whose name contains 'noise'",
+    )
     parser.add_argument(
         "--force-torch-pointrope",
         action="store_true",

@@ -134,6 +134,9 @@ PYTHONPATH=src python scripts/finetune_litept.py \
   --batch-size 4 \
   --num-workers 4 \
   --num-gpus 1 \
+  --class-weighting sqrt_inverse \
+  --max-class-weight 10 \
+  --noise-frame-repeat 4 \
   --force-torch-pointrope
 ```
 
@@ -143,8 +146,24 @@ to select another Waymo-compatible checkpoint, `--prepare-only` to stop before t
 replace a previous generated run, or `--resume` to continue from
 `<output-dir>/experiment/model/model_last.pth`.
 
-Frames are randomly assigned to train and validation according to `--val-ratio` (default `0.2`). The split is
-reproducible: `--seed 42` is the default, and changing `--seed` produces another random split.
+Frames are assigned using a reproducible class-aware random split according to `--val-ratio` (default `0.2`).
+Every class with valid points is kept in at least one training frame; a class that occurs in only one frame
+therefore keeps that frame in train. If the requested validation size would remove the last training example
+of a class, the validation set is made smaller. `--seed 42` is the default, and changing `--seed` produces
+another valid random split.
+
+Classes with no valid training points are removed from the generated segmentation head and listed under
+`excluded_classes` in `taxonomy.json` and `class_statistics.json`. Remaining classes use inverse-square-root
+CrossEntropy weights computed from valid train points; `--max-class-weight` limits the weighting and
+`--class-weighting none` disables it. Lovasz loss remains enabled without per-class weights.
+
+Training frames containing an active class whose name includes `noise` are listed multiple times in
+`dataset/train_oversampled.json`. `--noise-frame-repeat 4` means four total appearances per noise frame;
+use `1` to disable this oversampling. Exact loss weights, repeated frames, and effective train sample count
+are written to `class_statistics.json` and `run_manifest.json`.
+
+These changes can alter both the split and the number of output classes. Start a fresh run with `--overwrite`;
+do not use `--resume` with a checkpoint created from the previous taxonomy/head.
 
 `--force-torch-pointrope` replaces LitePT's compiled PointROPE CUDA extension with its PyTorch implementation.
 Use it when training fails on the first batch with `CUDA error: no kernel image is available for execution on
@@ -154,6 +173,7 @@ capability.
 Generated artifacts include:
 
 - `dataset/{train,val}/<frame>/{coord.npy,strength.npy,segment.npy}`
+- `dataset/train_oversampled.json`
 - `litept_custom_config.py`
 - `train_litept_custom.py`
 - `pretrained_backbone.pth`

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, OrderedDict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import math
 import os
@@ -19,6 +19,8 @@ from .litept_adapter import normalize_litept_strength
 
 IGNORE_TRAINING_ID = -1
 DEFAULT_OUTPUT_IGNORE_ID = 255
+DEFAULT_NOISE_FRAME_REPEAT = 4
+DEFAULT_MAX_CLASS_WEIGHT = 10.0
 GENERATED_FILES = (
     "litept_custom_config.py",
     "train_litept_custom.py",
@@ -45,8 +47,10 @@ class FinetuneFrame:
     mask_path: str
     split: str
     point_count: int
+    valid_point_count: int
     mask_shape: list[int]
     source_label_counts: dict[str, int]
+    valid_source_label_counts: dict[str, int]
     unknown_source_ids: list[int]
 
 
@@ -74,6 +78,9 @@ class LitePTFinetunePlan:
     grid_size: float
     head_lr: float
     backbone_lr: float
+    class_weighting: str
+    max_class_weight: float
+    noise_frame_repeat: int
     force_torch_pointrope: bool
 
     def to_jsonable(self) -> dict[str, Any]:
@@ -81,6 +88,11 @@ class LitePTFinetunePlan:
         payload["frame_count"] = len(self.frames)
         payload["train_frame_count"] = len(self.train_frame_ids)
         payload["val_frame_count"] = len(self.val_frame_ids)
+        payload["requested_val_frame_count"] = min(
+            len(self.frames) - 1,
+            max(1, int(math.ceil(len(self.frames) * self.val_ratio))),
+        )
+        payload["split_strategy"] = "class_aware_random"
         return payload
 
 
@@ -100,6 +112,9 @@ def build_finetune_plan(
     grid_size: float = 0.05,
     head_lr: float = 2e-4,
     backbone_lr: float = 2e-5,
+    class_weighting: str = "sqrt_inverse",
+    max_class_weight: float = DEFAULT_MAX_CLASS_WEIGHT,
+    noise_frame_repeat: int = DEFAULT_NOISE_FRAME_REPEAT,
     force_torch_pointrope: bool = False,
 ) -> LitePTFinetunePlan:
     _validate_training_options(
@@ -111,6 +126,9 @@ def build_finetune_plan(
         grid_size=grid_size,
         head_lr=head_lr,
         backbone_lr=backbone_lr,
+        class_weighting=class_weighting,
+        max_class_weight=max_class_weight,
+        noise_frame_repeat=noise_frame_repeat,
     )
 
     root = Path(litept_root).expanduser().resolve()
@@ -122,22 +140,45 @@ def build_finetune_plan(
     _require_dir(labeler_path, "Point-labeler dataset")
 
     labels_xml = labeler_path / "labels.xml"
-    taxonomy = build_training_taxonomy(read_labels_xml(labels_xml))
+    full_taxonomy = build_training_taxonomy(read_labels_xml(labels_xml))
     frame_ids = discover_exported_frame_ids(export_path)
-    train_ids, val_ids = split_frame_ids(frame_ids, val_ratio=val_ratio, seed=seed)
-    split_by_id = {frame_id: "train" for frame_id in train_ids}
-    split_by_id.update({frame_id: "val" for frame_id in val_ids})
-
-    frames = [
+    inspected_frames = [
         inspect_finetune_frame(
             frame_id=frame_id,
             points_path=labeler_path / "velodyne" / f"{frame_id}.bin",
             mask_path=export_path / frame_id / "semantic_mask.npy",
-            split=split_by_id[frame_id],
-            known_source_ids=set(taxonomy["source_id_to_training_id"]) | set(taxonomy["ignore_source_ids"]),
+            split="unassigned",
+            known_source_ids=set(full_taxonomy["source_id_to_training_id"])
+            | set(full_taxonomy["ignore_source_ids"]),
         )
         for frame_id in frame_ids
     ]
+    trainable_source_ids = set(int(value) for value in full_taxonomy["source_id_to_training_id"])
+    frame_class_ids = {
+        frame.frame_id: {
+            int(source_id)
+            for source_id, count in frame.valid_source_label_counts.items()
+            if int(count) > 0 and int(source_id) in trainable_source_ids
+        }
+        for frame in inspected_frames
+    }
+    train_ids, val_ids = split_frame_ids(
+        frame_ids,
+        val_ratio=val_ratio,
+        seed=seed,
+        frame_class_ids=frame_class_ids,
+    )
+    split_by_id = {frame_id: "train" for frame_id in train_ids}
+    split_by_id.update({frame_id: "val" for frame_id in val_ids})
+    frames = [replace(frame, split=split_by_id[frame.frame_id]) for frame in inspected_frames]
+    active_source_ids = {
+        int(source_id)
+        for frame in frames
+        if frame.split == "train"
+        for source_id, count in frame.valid_source_label_counts.items()
+        if int(count) > 0 and int(source_id) in trainable_source_ids
+    }
+    taxonomy = restrict_training_taxonomy(full_taxonomy, active_source_ids)
 
     checkpoint_path = (
         Path(checkpoint).expanduser().resolve()
@@ -167,6 +208,9 @@ def build_finetune_plan(
         grid_size=grid_size,
         head_lr=head_lr,
         backbone_lr=backbone_lr,
+        class_weighting=class_weighting,
+        max_class_weight=max_class_weight,
+        noise_frame_repeat=noise_frame_repeat,
         force_torch_pointrope=force_torch_pointrope,
     )
 
@@ -261,6 +305,57 @@ def build_training_taxonomy(classes: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def restrict_training_taxonomy(
+    taxonomy: dict[str, Any],
+    active_source_ids: set[int],
+) -> dict[str, Any]:
+    classes: list[dict[str, Any]] = []
+    excluded_classes: list[dict[str, Any]] = []
+    source_to_training: dict[int, int] = {}
+    training_to_source: list[int] = []
+    class_names: list[str] = []
+
+    for item in taxonomy["classes"]:
+        current = dict(item)
+        source_id = int(current["source_id"])
+        if current.get("ignore"):
+            classes.append(current)
+            continue
+        if source_id not in active_source_ids:
+            current["training_id"] = None
+            current["excluded_from_training"] = True
+            current["excluded_reason"] = "no_train_points"
+            classes.append(current)
+            excluded_classes.append(
+                {
+                    "name": str(current["name"]),
+                    "source_id": source_id,
+                    "reason": "no_train_points",
+                }
+            )
+            continue
+
+        training_id = len(training_to_source)
+        current["training_id"] = training_id
+        current["excluded_from_training"] = False
+        classes.append(current)
+        source_to_training[source_id] = training_id
+        training_to_source.append(source_id)
+        class_names.append(str(current["name"]))
+
+    if not class_names:
+        raise ValueError("No taxonomy classes have valid points in the training split")
+    return {
+        **taxonomy,
+        "class_names": class_names,
+        "num_classes": len(class_names),
+        "classes": classes,
+        "source_id_to_training_id": source_to_training,
+        "training_id_to_source_id": training_to_source,
+        "excluded_classes": excluded_classes,
+    }
+
+
 def discover_exported_frame_ids(export_dir: Path) -> list[str]:
     frame_ids = sorted(
         path.name
@@ -279,6 +374,7 @@ def split_frame_ids(
     *,
     val_ratio: float,
     seed: int = 42,
+    frame_class_ids: dict[str, set[int]] | None = None,
 ) -> tuple[list[str], list[str]]:
     if len(frame_ids) < 2:
         raise ValueError("At least 2 frames are required for train/validation split")
@@ -286,10 +382,57 @@ def split_frame_ids(
         raise ValueError(f"val_ratio must be between 0 and 1, got {val_ratio}")
     ordered = sorted(frame_ids)
     val_count = min(len(ordered) - 1, max(1, int(math.ceil(len(ordered) * val_ratio))))
-    shuffled_indices = np.random.default_rng(seed).permutation(len(ordered))
-    val_indices = set(int(index) for index in shuffled_indices[:val_count])
-    train = [frame_id for index, frame_id in enumerate(ordered) if index not in val_indices]
-    val = [frame_id for index, frame_id in enumerate(ordered) if index in val_indices]
+    rng = np.random.default_rng(seed)
+    if frame_class_ids is None:
+        shuffled_indices = rng.permutation(len(ordered))
+        val_indices = set(int(index) for index in shuffled_indices[:val_count])
+        train = [frame_id for index, frame_id in enumerate(ordered) if index not in val_indices]
+        val = [frame_id for index, frame_id in enumerate(ordered) if index in val_indices]
+        return train, val
+
+    class_ids_by_frame = {
+        frame_id: set(int(value) for value in frame_class_ids.get(frame_id, set()))
+        for frame_id in ordered
+    }
+    remaining_class_frames = Counter(
+        class_id
+        for frame_id in ordered
+        for class_id in class_ids_by_frame[frame_id]
+    )
+    val_class_ids: set[int] = set()
+    val_ids: list[str] = []
+    available = set(ordered)
+    tie_break = {frame_id: float(rng.random()) for frame_id in ordered}
+
+    while len(val_ids) < val_count:
+        eligible: list[tuple[tuple[float, float, float], str]] = []
+        for frame_id in available:
+            class_ids = class_ids_by_frame[frame_id]
+            if any(remaining_class_frames[class_id] <= 1 for class_id in class_ids):
+                continue
+            new_coverage = sum(
+                1.0 / remaining_class_frames[class_id]
+                for class_id in class_ids
+                if class_id not in val_class_ids
+            )
+            rarity = sum(1.0 / remaining_class_frames[class_id] for class_id in class_ids)
+            eligible.append(((new_coverage, rarity, tie_break[frame_id]), frame_id))
+        if not eligible:
+            break
+        _, selected = max(eligible)
+        val_ids.append(selected)
+        available.remove(selected)
+        for class_id in class_ids_by_frame[selected]:
+            remaining_class_frames[class_id] -= 1
+            val_class_ids.add(class_id)
+
+    if not val_ids:
+        raise ValueError(
+            "Cannot create a non-empty validation split while keeping every represented class in training"
+        )
+    val_set = set(val_ids)
+    train = [frame_id for frame_id in ordered if frame_id not in val_set]
+    val = [frame_id for frame_id in ordered if frame_id in val_set]
     return train, val
 
 
@@ -320,6 +463,14 @@ def inspect_finetune_frame(
 
     unique_ids, counts = np.unique(mask, return_counts=True)
     label_counts = {str(int(label_id)): int(count) for label_id, count in zip(unique_ids, counts)}
+    points = np.memmap(points_path, dtype=np.float32, mode="r").reshape(-1, 4)
+    valid = valid_litept_points(points)
+    valid_labels = np.asarray(mask).reshape(-1)[valid]
+    valid_ids, valid_counts = np.unique(valid_labels, return_counts=True)
+    valid_label_counts = {
+        str(int(label_id)): int(count)
+        for label_id, count in zip(valid_ids, valid_counts)
+    }
     unknown_ids = sorted(int(label_id) for label_id in unique_ids if int(label_id) not in known_source_ids)
     return FinetuneFrame(
         frame_id=frame_id,
@@ -327,8 +478,10 @@ def inspect_finetune_frame(
         mask_path=str(mask_path.resolve()),
         split=split,
         point_count=point_count,
+        valid_point_count=int(np.count_nonzero(valid)),
         mask_shape=[int(value) for value in mask.shape],
         source_label_counts=label_counts,
+        valid_source_label_counts=valid_label_counts,
         unknown_source_ids=unknown_ids,
     )
 
@@ -357,6 +510,7 @@ def prepare_finetune_run(
         "unknown_source_ids": Counter(),
     }
     frame_summaries: list[dict[str, Any]] = []
+    frame_training_ids: dict[str, set[int]] = {}
 
     for frame in plan.frames:
         points = np.fromfile(frame.points_path, dtype=np.float32).reshape(-1, 4)
@@ -381,6 +535,11 @@ def prepare_finetune_run(
         np.save(frame_dir / "segment.npy", segment)
 
         training_ids, counts = np.unique(segment, return_counts=True)
+        frame_training_ids[frame.frame_id] = {
+            int(training_id)
+            for training_id in training_ids
+            if int(training_id) != IGNORE_TRAINING_ID
+        }
         for training_id, count in zip(training_ids, counts):
             if int(training_id) == IGNORE_TRAINING_ID:
                 class_counts["ignored"]["all"] += int(count)
@@ -405,13 +564,34 @@ def prepare_finetune_run(
 
     taxonomy_path = output_dir / "taxonomy.json"
     taxonomy_path.write_text(json.dumps(plan.taxonomy, ensure_ascii=False, indent=2), encoding="utf-8")
-    statistics = _class_statistics_payload(plan.taxonomy, class_counts)
+    class_weights = compute_class_weights(
+        [int(class_counts["train"][training_id]) for training_id in range(plan.taxonomy["num_classes"])],
+        method=plan.class_weighting,
+        max_weight=plan.max_class_weight,
+    )
+    train_split_path, oversampling = write_oversampled_train_split(
+        plan,
+        frame_training_ids=frame_training_ids,
+    )
+    statistics = _class_statistics_payload(
+        plan,
+        class_counts,
+        class_weights=class_weights,
+        oversampling=oversampling,
+    )
     (output_dir / "class_statistics.json").write_text(
         json.dumps(statistics, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     config_path = Path(plan.config_path)
-    config_path.write_text(render_litept_config(plan), encoding="utf-8")
+    config_path.write_text(
+        render_litept_config(
+            plan,
+            class_weights=class_weights,
+            train_split=train_split_path.name,
+        ),
+        encoding="utf-8",
+    )
     launcher_path = output_dir / "train_litept_custom.py"
     launcher_path.write_text(render_training_launcher(plan), encoding="utf-8")
     backbone_path = output_dir / "pretrained_backbone.pth"
@@ -426,6 +606,8 @@ def prepare_finetune_run(
             "removed_checkpoint_keys": removed_keys,
             "taxonomy_path": str(taxonomy_path),
             "class_statistics": str(output_dir / "class_statistics.json"),
+            "class_weights": class_weights,
+            "oversampling": oversampling,
             "frame_summaries": frame_summaries,
         }
     )
@@ -459,7 +641,69 @@ def remap_source_labels(labels: np.ndarray, source_to_training: dict[int, int]) 
     return result
 
 
-def render_litept_config(plan: LitePTFinetunePlan) -> str:
+def compute_class_weights(
+    train_counts: list[int],
+    *,
+    method: str = "sqrt_inverse",
+    max_weight: float = DEFAULT_MAX_CLASS_WEIGHT,
+) -> list[float] | None:
+    if method == "none":
+        return None
+    if method != "sqrt_inverse":
+        raise ValueError(f"Unsupported class weighting method: {method}")
+    counts = np.asarray(train_counts, dtype=np.float64)
+    if counts.ndim != 1 or counts.size == 0:
+        raise ValueError("train_counts must be a non-empty one-dimensional list")
+    if np.any(counts <= 0):
+        raise ValueError(f"All active classes must have train points, got {train_counts}")
+
+    raw = np.sqrt(counts.sum() / (counts.size * counts))
+    raw = np.clip(raw, 1.0 / max_weight, max_weight)
+    normalized = raw / raw.mean()
+    return [round(float(value), 6) for value in normalized]
+
+
+def write_oversampled_train_split(
+    plan: LitePTFinetunePlan,
+    *,
+    frame_training_ids: dict[str, set[int]],
+) -> tuple[Path, dict[str, Any]]:
+    noise_training_ids = {
+        training_id
+        for training_id, name in enumerate(plan.taxonomy["class_names"])
+        if "noise" in str(name).casefold()
+    }
+    entries: list[str] = []
+    repeated_frames: dict[str, int] = {}
+    for frame_id in plan.train_frame_ids:
+        has_noise = bool(frame_training_ids.get(frame_id, set()) & noise_training_ids)
+        repeat = plan.noise_frame_repeat if has_noise else 1
+        entries.extend([f"train/{frame_id}"] * repeat)
+        if repeat > 1:
+            repeated_frames[frame_id] = repeat
+
+    split_path = Path(plan.dataset_dir) / "train_oversampled.json"
+    split_path.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+    return split_path, {
+        "strategy": "repeat_frames_with_noise_classes",
+        "noise_training_ids": sorted(noise_training_ids),
+        "noise_class_names": [
+            plan.taxonomy["class_names"][training_id]
+            for training_id in sorted(noise_training_ids)
+        ],
+        "noise_frame_repeat": plan.noise_frame_repeat,
+        "original_train_frames": len(plan.train_frame_ids),
+        "effective_train_samples": len(entries),
+        "repeated_frames": repeated_frames,
+    }
+
+
+def render_litept_config(
+    plan: LitePTFinetunePlan,
+    *,
+    class_weights: list[float] | None,
+    train_split: str,
+) -> str:
     base_config = Path(plan.litept_root) / "configs" / "waymo" / "semseg-litept-small-v1m1.py"
     class_names = plan.taxonomy["class_names"]
     source_ids = plan.taxonomy["training_id_to_source_id"]
@@ -493,7 +737,7 @@ scheduler = dict(
 model = dict(
     num_classes={num_classes},
     criteria=[
-        dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1),
+        dict(type="CrossEntropyLoss", weight={class_weights!r}, loss_weight=1.0, ignore_index=-1),
         dict(type="LovaszLoss", mode="multiclass", loss_weight=1.0, ignore_index=-1),
     ],
 )
@@ -504,6 +748,8 @@ ignore_index = -1
 names = {class_names!r}
 training_id_to_source_id = {source_ids!r}
 output_ignore_index = {int(plan.taxonomy["output_ignore_index"])}
+class_weights = {class_weights!r}
+excluded_classes = {plan.taxonomy.get("excluded_classes", [])!r}
 
 train_transform = [
     dict(type="RandomRotate", angle=[-1, 1], axis="z", center=[0, 0, 0], p=0.5),
@@ -545,7 +791,7 @@ data = dict(
     names=names,
     train=dict(
         type=dataset_type,
-        split="train",
+        split={train_split!r},
         data_root=data_root,
         transform=train_transform,
         test_mode=False,
@@ -758,7 +1004,14 @@ def _prepare_output_directory(output_dir: Path, *, overwrite: bool) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _class_statistics_payload(taxonomy: dict[str, Any], counts: dict[str, Any]) -> dict[str, Any]:
+def _class_statistics_payload(
+    plan: LitePTFinetunePlan,
+    counts: dict[str, Any],
+    *,
+    class_weights: list[float] | None,
+    oversampling: dict[str, Any],
+) -> dict[str, Any]:
+    taxonomy = plan.taxonomy
     classes = []
     for training_id, (name, source_id) in enumerate(
         zip(taxonomy["class_names"], taxonomy["training_id_to_source_id"])
@@ -771,10 +1024,37 @@ def _class_statistics_payload(taxonomy: dict[str, Any], counts: dict[str, Any]) 
                 "all_points": int(counts["all"][training_id]),
                 "train_points": int(counts["train"][training_id]),
                 "val_points": int(counts["val"][training_id]),
+                "loss_weight": (
+                    float(class_weights[training_id])
+                    if class_weights is not None
+                    else 1.0
+                ),
+            }
+        )
+    excluded_classes = []
+    for item in taxonomy.get("excluded_classes", []):
+        source_id = int(item["source_id"])
+        split_counts = {"all": 0, "train": 0, "val": 0}
+        for frame in plan.frames:
+            count = int(frame.valid_source_label_counts.get(str(source_id), 0))
+            split_counts["all"] += count
+            split_counts[frame.split] += count
+        excluded_classes.append(
+            {
+                **item,
+                "all_points": split_counts["all"],
+                "train_points": split_counts["train"],
+                "val_points": split_counts["val"],
             }
         )
     return {
         "classes": classes,
+        "excluded_classes": excluded_classes,
+        "class_weighting": {
+            "method": plan.class_weighting,
+            "max_weight": plan.max_class_weight,
+        },
+        "oversampling": oversampling,
         "ignored_points": counts["ignored"],
         "unknown_source_ids": {
             str(source_id): int(count)
@@ -810,6 +1090,9 @@ def _validate_training_options(
     grid_size: float,
     head_lr: float,
     backbone_lr: float,
+    class_weighting: str,
+    max_class_weight: float,
+    noise_frame_repeat: int,
 ) -> None:
     if epochs <= 0:
         raise ValueError(f"epochs must be positive, got {epochs}")
@@ -825,3 +1108,11 @@ def _validate_training_options(
         raise ValueError(f"grid_size must be positive, got {grid_size}")
     if head_lr <= 0.0 or backbone_lr <= 0.0:
         raise ValueError("head_lr and backbone_lr must be positive")
+    if class_weighting not in {"none", "sqrt_inverse"}:
+        raise ValueError(
+            f"class_weighting must be one of none/sqrt_inverse, got {class_weighting}"
+        )
+    if max_class_weight < 1.0:
+        raise ValueError(f"max_class_weight must be at least 1, got {max_class_weight}")
+    if noise_frame_repeat < 1:
+        raise ValueError(f"noise_frame_repeat must be at least 1, got {noise_frame_repeat}")
