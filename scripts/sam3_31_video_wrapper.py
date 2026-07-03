@@ -17,7 +17,7 @@ def main() -> None:
     if args.sam3_root:
         sys.path.insert(0, str(Path(args.sam3_root).resolve()))
 
-    from sam3.model_builder import build_sam3_multiplex_video_predictor  # noqa: WPS433
+    import sam3.model_builder as sam3_model_builder  # noqa: WPS433
 
     prompts = load_prompt_config(args.prompts)
     requested_frames = load_requested_frames(args.frames_json)
@@ -29,8 +29,9 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     predictor = build_local_or_default_predictor(
-        build_sam3_multiplex_video_predictor,
+        sam3_model_builder,
         sam3_model_path=args.sam3_model_path,
+        sam3_root=args.sam3_root,
     )
     response = predictor.handle_request(
         request={
@@ -117,7 +118,9 @@ def close_session(predictor: Any, session_id: str) -> None:
     predictor.handle_request(request={"type": "close_session", "session_id": session_id})
 
 
-def build_local_or_default_predictor(builder: Any, *, sam3_model_path: str | None) -> Any:
+def build_local_or_default_predictor(model_builder_module: Any, *, sam3_model_path: str | None, sam3_root: str | None) -> Any:
+    builder = model_builder_module.build_sam3_multiplex_video_predictor
+    sam3_model_path = sam3_model_path or infer_local_model_path(sam3_root)
     if sam3_model_path is None:
         return builder()
 
@@ -130,6 +133,7 @@ def build_local_or_default_predictor(builder: Any, *, sam3_model_path: str | Non
         raise FileNotFoundError(f"Missing SAM3.1 checkpoint sam3.1_multiplex.pt in local model directory: {model_dir}")
 
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    patch_hf_checkpoint_download(model_builder_module, checkpoint_path=checkpoint_path, model_dir=model_dir)
     signature = inspect.signature(builder)
     params = signature.parameters
     kwargs: dict[str, Any] = {}
@@ -150,11 +154,27 @@ def build_local_or_default_predictor(builder: Any, *, sam3_model_path: str | Non
             break
 
     if not kwargs:
-        raise TypeError(
-            "Could not pass local SAM3.1 model directory to build_sam3_multiplex_video_predictor. "
-            f"Builder signature is: {signature}. Expected one of checkpoint_path/config_path/model_path-like parameters."
-        )
+        return builder()
     return builder(**kwargs)
+
+
+def infer_local_model_path(sam3_root: str | None) -> str | None:
+    if sam3_root is None:
+        return None
+    candidate = Path(sam3_root).expanduser().resolve() / "sam3.1"
+    if (candidate / "config.json").is_file() and (candidate / "sam3.1_multiplex.pt").is_file():
+        return str(candidate)
+    return None
+
+
+def patch_hf_checkpoint_download(model_builder_module: Any, *, checkpoint_path: Path, model_dir: Path) -> None:
+    def _local_download_ckpt_from_hf(*args: Any, **kwargs: Any) -> str:
+        return str(checkpoint_path)
+
+    model_builder_module.download_ckpt_from_hf = _local_download_ckpt_from_hf
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    os.environ.setdefault("HF_HOME", str(model_dir))
 
 
 def extract_output_arrays(outputs: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
