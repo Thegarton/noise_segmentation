@@ -52,6 +52,8 @@ def main() -> None:
         sam3_extra_args = []
         if args.sam3_root is not None:
             sam3_extra_args.extend(["--sam3-root", args.sam3_root])
+        if args.sam3_model_path is not None:
+            sam3_extra_args.extend(["--sam3-model-path", args.sam3_model_path])
         sam3_extra_args.extend(args.sam3_wrapper_arg)
         run_sam3_video_teacher(
             video=args.video,
@@ -137,6 +139,7 @@ def main() -> None:
             "sam3_conda_env": args.sam3_conda_env if args.sam3_conda_prefix is None else None,
             "sam3_conda_prefix": args.sam3_conda_prefix,
             "sam3_root": args.sam3_root,
+            "sam3_model_path": args.sam3_model_path,
         }
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         exported.append({"frame_id": frame.frame_id, "status": "created", "metadata": str(metadata_path)})
@@ -190,6 +193,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sam3-conda-env", default="sam3")
     p.add_argument("--sam3-conda-prefix", default=None)
     p.add_argument("--sam3-root", default=None, help="Optional path to the SAM3 repository, passed to the wrapper.")
+    p.add_argument("--sam3-model-path", default=None, help="Optional local facebook/sam3.1 model directory, passed to the wrapper.")
     p.add_argument("--sam3-wrapper-arg", action="append", default=[], help="Extra argument passed to the SAM3 video wrapper.")
     p.add_argument("--min-score", type=float, default=0.7)
     p.add_argument("--overwrite", action="store_true")

@@ -41,11 +41,11 @@ def test_sam3_video_command_uses_conda_prefix():
         sam3_video_script="/tools/sam3_video.py",
         conda_env="sam3",
         conda_prefix="/home/a60116606/miniconda3/envs/sam3",
-        extra_args=["--sam3-root", "/home/a60116606/git_repo/sam3"],
+        extra_args=["--sam3-root", "/home/a60116606/git_repo/sam3", "--sam3-model-path", "/home/a60116606/git_repo/sam3/sam3.1"],
     )
 
     assert cmd[:5] == ["conda", "run", "-p", "/home/a60116606/miniconda3/envs/sam3", "python"]
-    assert cmd[-2:] == ["--sam3-root", "/home/a60116606/git_repo/sam3"]
+    assert cmd[-4:] == ["--sam3-root", "/home/a60116606/git_repo/sam3", "--sam3-model-path", "/home/a60116606/git_repo/sam3/sam3.1"]
 
 
 def test_camera_manifest_filters_synced_frames(tmp_path: Path):

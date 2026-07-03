@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,7 +28,10 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    predictor = build_sam3_multiplex_video_predictor()
+    predictor = build_local_or_default_predictor(
+        build_sam3_multiplex_video_predictor,
+        sam3_model_path=args.sam3_model_path,
+    )
     response = predictor.handle_request(
         request={
             "type": "start_session",
@@ -110,6 +115,46 @@ def propagate_in_video(predictor: Any, session_id: str):
 
 def close_session(predictor: Any, session_id: str) -> None:
     predictor.handle_request(request={"type": "close_session", "session_id": session_id})
+
+
+def build_local_or_default_predictor(builder: Any, *, sam3_model_path: str | None) -> Any:
+    if sam3_model_path is None:
+        return builder()
+
+    model_dir = Path(sam3_model_path).expanduser().resolve()
+    config_path = model_dir / "config.json"
+    checkpoint_path = model_dir / "sam3.1_multiplex.pt"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Missing SAM3.1 config.json in local model directory: {model_dir}")
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Missing SAM3.1 checkpoint sam3.1_multiplex.pt in local model directory: {model_dir}")
+
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    signature = inspect.signature(builder)
+    params = signature.parameters
+    kwargs: dict[str, Any] = {}
+
+    for name in ("checkpoint_path", "ckpt_path", "checkpoint", "ckpt", "weights_path"):
+        if name in params:
+            kwargs[name] = str(checkpoint_path)
+            break
+
+    for name in ("config_path", "cfg_path", "model_config_path", "config_file", "hf_config_path"):
+        if name in params:
+            kwargs[name] = str(config_path)
+            break
+
+    for name in ("model_path", "model_dir", "model_id", "repo_id"):
+        if name in params:
+            kwargs[name] = str(model_dir)
+            break
+
+    if not kwargs:
+        raise TypeError(
+            "Could not pass local SAM3.1 model directory to build_sam3_multiplex_video_predictor. "
+            f"Builder signature is: {signature}. Expected one of checkpoint_path/config_path/model_path-like parameters."
+        )
+    return builder(**kwargs)
 
 
 def extract_output_arrays(outputs: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
@@ -286,6 +331,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frames-json", required=True, help="JSON with requested frame_id/video_frame_index pairs.")
     parser.add_argument("--output-dir", required=True, help="Directory where <frame_id>.npz outputs are written.")
     parser.add_argument("--sam3-root", default=None, help="Optional path to the SAM3 repository.")
+    parser.add_argument("--sam3-model-path", default=None, help="Optional local facebook/sam3.1 HuggingFace model directory.")
     parser.add_argument("--prompt-frame-index", type=int, default=0)
     return parser.parse_args()
 
