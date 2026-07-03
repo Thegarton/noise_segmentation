@@ -272,6 +272,28 @@ PYTHONPATH=src python scripts/run_sam3_text_teacher.py \
   --validate
 ```
 
+For video-aware SAM3 pseudo-labels, run the video teacher from the main LitePT environment and let it
+call SAM3 in its own Conda environment. `scripts/sam3_31_video_wrapper.py` follows the SAM3.1 notebook API:
+`build_sam3_multiplex_video_predictor()`, `start_session`, text `add_prompt`, and `propagate_in_video`.
+
+```bash
+PYTHONPATH=src python scripts/run_sam3_video_teacher.py \
+  --video ./camera.mp4 \
+  --camera-frame-manifest ./data/camera_frame_manifest.json \
+  --prompt-config configs/sam3_text_prompts_pointwise_v1.yaml \
+  --classes-yaml configs/classes_pointwise_v1.yaml \
+  --sam3-conda-env sam3 \
+  --sam3-video-script scripts/sam3_31_video_wrapper.py \
+  --sam3-root /home/a60116606/git_repo/sam3 \
+  --out-dir ./out/sam3_video_teacher \
+  --validate
+```
+
+If the SAM3 environment must be selected by absolute path, replace `--sam3-conda-env sam3` with
+`--sam3-conda-prefix /home/a60116606/miniconda3/envs/sam3`. The wrapper accepts an MP4 file or a directory
+of numbered JPEG frames. Outputs are written as `<out-dir>/<frame_id>/sam3_video.npz`, `semantic_mask.npy`,
+`confidence.npy`, `metadata.json`, and, when the synced image exists, `image.jpg`/`overlay.jpg`.
+
 Fuse Waymo LitePT masks and SAM3 camera candidates into project-v1 point-wise seed labels. Residual
 points are not automatically converted to `noise`; ambiguous points stay background/ignore or go to review.
 
