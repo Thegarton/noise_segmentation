@@ -9,8 +9,6 @@ from typing import Any
 
 import numpy as np
 
-from .sam3_text_adapter import load_prompt_config
-
 
 @dataclass(frozen=True)
 class Sam3VideoFrame:
@@ -176,6 +174,28 @@ def labels_to_ids_from_prompt_config(project_classes_path: str | Path, prompt_co
     return label_to_id
 
 
+def load_prompt_config(path: str | Path) -> dict[str, list[str]]:
+    prompts: dict[str, list[str]] = {}
+    current_key: str | None = None
+    for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line.strip()
+        if indent == 0 and ":" in stripped:
+            key, value = [x.strip() for x in stripped.split(":", 1)]
+            current_key = key
+            if value:
+                prompts[key] = [_strip_quotes(x.strip()) for x in value.strip("[]").split(",") if x.strip()]
+            else:
+                prompts[key] = []
+            continue
+        if indent >= 2 and stripped.startswith("- ") and current_key is not None:
+            prompts[current_key].append(_strip_quotes(stripped[2:].strip()))
+    return prompts
+
+
 def class_names_from_mapping(mapping: dict[str, int]) -> list[str]:
     max_id = max(class_id for class_id in mapping.values() if class_id != 255)
     names = [""] * (max_id + 1)
@@ -280,6 +300,12 @@ def copy_frame_image(image_path: str | None, output_path: str | Path) -> str | N
 def _stable_bgr_color(label: int) -> tuple[int, int, int]:
     value = (label * 1103515245 + 12345) & 0xFFFFFF
     return int(value & 0xFF), int((value >> 8) & 0xFF), int((value >> 16) & 0xFF)
+
+
+def _strip_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] in {"'", '"'} and value[-1] == value[0]:
+        return value[1:-1]
+    return value
 
 
 def _optional_int(value: Any) -> int | None:
