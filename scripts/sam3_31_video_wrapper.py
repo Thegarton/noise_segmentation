@@ -56,7 +56,10 @@ def main() -> None:
                     frame_index=args.prompt_frame_index,
                     prompt=prompt,
                 )
+                remaining_frame_indices = set(frame_index_to_ids)
                 for frame_index, outputs in propagate_in_video(predictor, session_id):
+                    if args.max_video_frame_index is not None and frame_index > args.max_video_frame_index:
+                        break
                     if frame_index not in frame_index_to_ids:
                         continue
                     masks, scores, track_ids, boxes = extract_output_arrays(outputs)
@@ -72,6 +75,9 @@ def main() -> None:
                                     "box": boxes[i] if boxes is not None else None,
                                 }
                             )
+                    remaining_frame_indices.discard(frame_index)
+                    if not remaining_frame_indices:
+                        break
     finally:
         close_session(predictor, session_id)
 
@@ -353,6 +359,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sam3-root", default=None, help="Optional path to the SAM3 repository.")
     parser.add_argument("--sam3-model-path", default=None, help="Optional local facebook/sam3.1 HuggingFace model directory.")
     parser.add_argument("--prompt-frame-index", type=int, default=0)
+    parser.add_argument(
+        "--max-video-frame-index",
+        type=int,
+        default=None,
+        help="Stop SAM3 propagation after this video frame index.",
+    )
     return parser.parse_args()
 
 

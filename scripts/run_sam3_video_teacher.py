@@ -51,9 +51,12 @@ def main() -> None:
     ]
 
     frames_json = out_dir / "sam3_video_frames.json"
+    max_video_frame_index = None
     if frames_to_run:
         write_frames_json(frames_json, frames_to_run)
+        max_video_frame_index = max(frame.video_frame_index for frame in frames_to_run)
         sam3_extra_args = []
+        sam3_extra_args.extend(["--max-video-frame-index", str(max_video_frame_index)])
         if args.sam3_root is not None:
             sam3_extra_args.extend(["--sam3-root", args.sam3_root])
         if args.sam3_model_path is not None:
@@ -159,6 +162,7 @@ def main() -> None:
         "raw_dir": str(raw_dir),
         "synced_frames": len(frames),
         "max_frames": args.max_frames,
+        "max_video_frame_index": max_video_frame_index,
         "processed_frames": len(exported),
         "frames": exported,
     }

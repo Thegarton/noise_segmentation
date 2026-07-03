@@ -152,6 +152,7 @@ def test_run_sam3_video_teacher_smoke_without_real_conda(tmp_path: Path, monkeyp
     out_dir = tmp_path / "out"
 
     def fake_run_sam3_video_teacher(**kwargs):
+        assert kwargs["extra_args"][:2] == ["--max-video-frame-index", "5"]
         frames_payload = json.loads(Path(kwargs["frames_json"]).read_text(encoding="utf-8"))
         raw_out = Path(kwargs["output_dir"])
         for frame in frames_payload["frames"]:
