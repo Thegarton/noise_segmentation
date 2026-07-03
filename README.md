@@ -286,6 +286,7 @@ PYTHONPATH=src python scripts/run_sam3_video_teacher.py \
   --sam3-video-script scripts/sam3_31_video_wrapper.py \
   --sam3-root /home/a60116606/git_repo/sam3 \
   --sam3-model-path /home/a60116606/git_repo/sam3/sam3.1 \
+  --max-frames 30 \
   --out-dir ./out/sam3_video_teacher \
   --validate
 ```
@@ -296,6 +297,7 @@ while `--sam3-model-path` points to the local HuggingFace `facebook/sam3.1` dire
 `config.json` and `sam3.1_multiplex.pt`; this avoids gated HuggingFace downloads at runtime. The wrapper accepts
 an MP4 file or a directory of numbered JPEG frames. Outputs are written as `<out-dir>/<frame_id>/sam3_video.npz`,
 `semantic_mask.npy`, `confidence.npy`, `metadata.json`, and, when the synced image exists, `image.jpg`/`overlay.jpg`.
+Use `--max-frames N` for smoke tests or to keep long videos from processing every synced LiDAR frame at once.
 
 Fuse Waymo LitePT masks and SAM3 camera candidates into project-v1 point-wise seed labels. Residual
 points are not automatically converted to `noise`; ambiguous points stay background/ignore or go to review.

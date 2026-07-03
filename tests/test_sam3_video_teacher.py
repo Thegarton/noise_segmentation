@@ -128,6 +128,15 @@ def test_run_sam3_video_teacher_smoke_without_real_conda(tmp_path: Path, monkeyp
                         "video_timestamp_us": 1002,
                         "delta_ms": 0.002,
                     },
+                    {
+                        "frame_id": "frame_003",
+                        "synced": True,
+                        "video_frame_index": 7,
+                        "image_path": str(image),
+                        "lidar_timestamp_us": 2000,
+                        "video_timestamp_us": 2002,
+                        "delta_ms": 0.002,
+                    },
                     {"frame_id": "frame_002", "synced": False, "video_frame_index": 6},
                 ],
             }
@@ -175,6 +184,8 @@ def test_run_sam3_video_teacher_smoke_without_real_conda(tmp_path: Path, monkeyp
             str(out_dir),
             "--sam3-video-script",
             str(tmp_path / "fake_sam3.py"),
+            "--max-frames",
+            "1",
             "--validate",
         ],
     )
@@ -188,6 +199,9 @@ def test_run_sam3_video_teacher_smoke_without_real_conda(tmp_path: Path, monkeyp
     assert (frame_out / "metadata.json").is_file()
     assert (out_dir / "sam3_video_teacher_manifest.json").is_file()
     assert not (out_dir / "frame_002").exists()
+    assert not (out_dir / "frame_003").exists()
+    frames_payload = json.loads((out_dir / "sam3_video_frames.json").read_text(encoding="utf-8"))
+    assert frames_payload["frames"] == [{"frame_id": "frame_001", "video_frame_index": 5}]
 
 
 def load_run_sam3_video_teacher_script():

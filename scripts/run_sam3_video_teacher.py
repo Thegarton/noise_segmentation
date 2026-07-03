@@ -35,6 +35,10 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     frames = load_camera_frame_manifest(args.camera_frame_manifest)
+    if args.max_frames is not None:
+        if args.max_frames <= 0:
+            raise ValueError(f"--max-frames must be positive, got {args.max_frames}")
+        frames = frames[: args.max_frames]
     if not frames:
         raise ValueError(f"No synced frames found in {args.camera_frame_manifest}")
 
@@ -154,6 +158,7 @@ def main() -> None:
         "frames_json": str(frames_json),
         "raw_dir": str(raw_dir),
         "synced_frames": len(frames),
+        "max_frames": args.max_frames,
         "processed_frames": len(exported),
         "frames": exported,
     }
@@ -195,6 +200,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sam3-root", default=None, help="Optional path to the SAM3 repository, passed to the wrapper.")
     p.add_argument("--sam3-model-path", default=None, help="Optional local facebook/sam3.1 model directory, passed to the wrapper.")
     p.add_argument("--sam3-wrapper-arg", action="append", default=[], help="Extra argument passed to the SAM3 video wrapper.")
+    p.add_argument("--max-frames", type=int, default=None, help="Process only the first N synced frames from camera_frame_manifest.json.")
     p.add_argument("--min-score", type=float, default=0.7)
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--validate", action="store_true")
