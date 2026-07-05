@@ -202,7 +202,9 @@ def test_run_sam3_video_teacher_smoke_without_real_conda(tmp_path: Path, monkeyp
     assert not (out_dir / "frame_002").exists()
     assert not (out_dir / "frame_003").exists()
     frames_payload = json.loads((out_dir / "sam3_video_frames.json").read_text(encoding="utf-8"))
-    assert frames_payload["frames"] == [{"frame_id": "frame_001", "video_frame_index": 5}]
+    assert frames_payload["frames"] == [
+        {"frame_id": "frame_001", "video_frame_index": 5, "image_path": str(image)}
+    ]
 
 
 def load_run_sam3_video_teacher_script():
