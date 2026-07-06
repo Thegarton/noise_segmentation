@@ -307,6 +307,26 @@ builds a temporary numbered JPEG folder containing only those requested frames a
 pass `--sam3-wrapper-arg=--use-original-video-resource`. FlashAttention 3 is disabled by default for GPU/dtype
 compatibility; pass `--sam3-wrapper-arg=--use-fa3` only on a confirmed compatible SAM3 environment.
 
+For a single-image, frame-by-frame SAM3 smoke test equivalent to `notebooks/sam3_single_image_prompts.ipynb`, run
+the folder script inside the SAM3 environment:
+
+```bash
+conda run -p /home/a60116606/miniconda3/envs/sam3 python scripts/run_sam3_single_image_folder.py \
+  --image-dir ./output/2025_12_15_08_16_49_frames_270/img2 \
+  --out-dir ./out/sam3_single_image_folder \
+  --prompt-config configs/sam3_text_prompts_pointwise_v1.yaml \
+  --classes-yaml configs/classes_pointwise_v1.yaml \
+  --sam3-root /home/a60116606/git_repo/sam3 \
+  --sam3-model-path /home/a60116606/git_repo/sam3/sam3.1 \
+  --min-score 0.7 \
+  --validate
+```
+
+Each image gets `<out-dir>/<image_stem>/semantic_mask.npy`, `confidence.npy`, `instances.npz`, `instances.json`,
+`overlay.jpg`, `semantic_color.png`, `preview.jpg`, `image.jpg`, and `metadata.json`. The script builds the SAM3
+predictor once, starts and closes a separate single-image session per frame, and applies every text prompt from the
+prompt config.
+
 Fuse Waymo LitePT masks and SAM3 camera candidates into project-v1 point-wise seed labels. Residual
 points are not automatically converted to `noise`; ambiguous points stay background/ignore or go to review.
 
