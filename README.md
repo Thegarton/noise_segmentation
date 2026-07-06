@@ -286,7 +286,7 @@ PYTHONPATH=src python scripts/run_sam3_video_teacher.py \
   --sam3-video-script scripts/sam3_31_video_wrapper.py \
   --sam3-root /home/a60116606/git_repo/sam3 \
   --sam3-model-path /home/a60116606/git_repo/sam3/sam3.1 \
-  --max-frames 30 \
+  --frame-batch-size 10 \
   --out-dir ./out/sam3_video_teacher \
   --validate
 ```
@@ -297,8 +297,11 @@ while `--sam3-model-path` points to the local HuggingFace `facebook/sam3.1` dire
 `config.json` and `sam3.1_multiplex.pt`; this avoids gated HuggingFace downloads at runtime. The wrapper accepts
 an MP4 file or a directory of numbered JPEG frames. Outputs are written as `<out-dir>/<frame_id>/sam3_video.npz`,
 `semantic_mask.npy`, `confidence.npy`, `metadata.json`, and, when the synced image exists, `image.jpg`/`overlay.jpg`.
-Use `--max-frames N` for smoke tests or to keep long videos from processing every synced LiDAR frame at once.
-The runner writes only the first `N` synced LiDAR frames to the SAM3 request JSON. By default the SAM3.1 wrapper
+Use `--max-frames N` for smoke tests when you intentionally want to process only the first `N` synced LiDAR
+frames. For full runs on limited VRAM, keep `--max-frames` unset and use `--frame-batch-size N`
+(`--sam3-frame-batch-size N` is an alias). The runner will still process every synced frame from
+`camera_frame_manifest.json`, but it will call the SAM3 wrapper in separate sequential processes of at most `N`
+frames each, for example 270 frames as 27 processes with `--frame-batch-size 10`. By default the SAM3.1 wrapper
 builds a temporary numbered JPEG folder containing only those requested frames and passes that folder to
 `start_session`, so the model does not decode/cache the full source video. If you need the old full-video behavior,
 pass `--sam3-wrapper-arg=--use-original-video-resource`. FlashAttention 3 is disabled by default for GPU/dtype

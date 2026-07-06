@@ -225,6 +225,100 @@ def test_run_sam3_video_teacher_smoke_without_real_conda(tmp_path: Path, monkeyp
     ]
 
 
+def test_run_sam3_video_teacher_batches_frames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    script = load_run_sam3_video_teacher_script()
+    image = tmp_path / "frame.jpg"
+    image.write_bytes(b"fake image bytes")
+    manifest = tmp_path / "camera_frame_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "frames": [
+                    {
+                        "frame_id": f"frame_{idx:03d}",
+                        "synced": True,
+                        "video_frame_index": 10 + idx,
+                        "image_path": str(image),
+                    }
+                    for idx in range(5)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    prompts = tmp_path / "prompts.yaml"
+    prompts.write_text('CAR:\n  - "car"\n', encoding="utf-8")
+    classes = tmp_path / "classes.yaml"
+    classes.write_text("semantic_classes:\n  background: 0\n  CAR: 2\n  ignore: 255\n", encoding="utf-8")
+    video = tmp_path / "camera.mp4"
+    video.write_bytes(b"fake video")
+    out_dir = tmp_path / "out"
+    calls = []
+
+    def fake_run_sam3_video_teacher(**kwargs):
+        frames_payload = json.loads(Path(kwargs["frames_json"]).read_text(encoding="utf-8"))
+        calls.append(
+            {
+                "frames": [frame["frame_id"] for frame in frames_payload["frames"]],
+                "extra_args": kwargs["extra_args"],
+            }
+        )
+        raw_out = Path(kwargs["output_dir"])
+        for frame in frames_payload["frames"]:
+            mask = np.zeros((1, 2, 3), dtype=bool)
+            mask[0, 0, 1] = True
+            np.savez(
+                raw_out / f"{frame['frame_id']}.npz",
+                masks=mask,
+                scores=np.asarray([0.9], dtype=np.float32),
+                labels=np.asarray(["CAR"]),
+                prompts=np.asarray(["car"]),
+            )
+
+    monkeypatch.setattr(script, "run_sam3_video_teacher", fake_run_sam3_video_teacher)
+    monkeypatch.setattr(script, "save_semantic_overlay", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_sam3_video_teacher.py",
+            "--video",
+            str(video),
+            "--camera-frame-manifest",
+            str(manifest),
+            "--prompt-config",
+            str(prompts),
+            "--classes-yaml",
+            str(classes),
+            "--out-dir",
+            str(out_dir),
+            "--sam3-video-script",
+            str(tmp_path / "fake_sam3.py"),
+            "--frame-batch-size",
+            "2",
+        ],
+    )
+
+    script.main()
+
+    assert [call["frames"] for call in calls] == [
+        ["frame_000", "frame_001"],
+        ["frame_002", "frame_003"],
+        ["frame_004"],
+    ]
+    assert [call["extra_args"][:2] for call in calls] == [
+        ["--max-video-frame-index", "11"],
+        ["--max-video-frame-index", "13"],
+        ["--max-video-frame-index", "14"],
+    ]
+    for idx in range(5):
+        assert (out_dir / f"frame_{idx:03d}" / "semantic_mask.npy").is_file()
+    manifest_payload = json.loads((out_dir / "sam3_video_teacher_manifest.json").read_text(encoding="utf-8"))
+    assert manifest_payload["frame_batch_size"] == 2
+    assert [run["frames"] for run in manifest_payload["sam3_runs"]] == [2, 2, 1]
+
+
 def load_run_sam3_video_teacher_script():
     script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_sam3_video_teacher.py"
     spec = importlib.util.spec_from_file_location("run_sam3_video_teacher", script_path)

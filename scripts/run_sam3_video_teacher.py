@@ -41,6 +41,8 @@ def main() -> None:
         frames = frames[: args.max_frames]
     if not frames:
         raise ValueError(f"No synced frames found in {args.camera_frame_manifest}")
+    if args.frame_batch_size is not None and args.frame_batch_size <= 0:
+        raise ValueError(f"--frame-batch-size must be positive, got {args.frame_batch_size}")
 
     raw_dir = out_dir / "_sam3_video_raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -51,26 +53,14 @@ def main() -> None:
     ]
 
     frames_json = out_dir / "sam3_video_frames.json"
-    max_video_frame_index = None
+    sam3_runs = []
     if frames_to_run:
-        write_frames_json(frames_json, frames_to_run)
-        max_video_frame_index = max(frame.video_frame_index for frame in frames_to_run)
-        sam3_extra_args = []
-        sam3_extra_args.extend(["--max-video-frame-index", str(max_video_frame_index)])
-        if args.sam3_root is not None:
-            sam3_extra_args.extend(["--sam3-root", args.sam3_root])
-        if args.sam3_model_path is not None:
-            sam3_extra_args.extend(["--sam3-model-path", args.sam3_model_path])
-        sam3_extra_args.extend(args.sam3_wrapper_arg)
-        run_sam3_video_teacher(
-            video=args.video,
-            prompt_config=args.prompt_config,
+        sam3_runs = run_sam3_batches(
+            args=args,
+            frames_to_run=frames_to_run,
             frames_json=frames_json,
-            output_dir=raw_dir,
-            sam3_video_script=args.sam3_video_script,
-            conda_env=args.sam3_conda_env,
-            conda_prefix=args.sam3_conda_prefix,
-            extra_args=sam3_extra_args,
+            raw_dir=raw_dir,
+            out_dir=out_dir,
         )
     elif not frames_json.is_file():
         write_frames_json(frames_json, frames)
@@ -162,13 +152,82 @@ def main() -> None:
         "raw_dir": str(raw_dir),
         "synced_frames": len(frames),
         "max_frames": args.max_frames,
-        "max_video_frame_index": max_video_frame_index,
+        "frame_batch_size": args.frame_batch_size,
+        "sam3_runs": sam3_runs,
+        "max_video_frame_index": max((run["max_video_frame_index"] for run in sam3_runs), default=None),
         "processed_frames": len(exported),
         "frames": exported,
     }
     manifest_path = out_dir / "sam3_video_teacher_manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"frames": len(exported), "manifest": str(manifest_path)}, indent=2))
+
+
+def run_sam3_batches(
+    *,
+    args: argparse.Namespace,
+    frames_to_run: list[Sam3VideoFrame],
+    frames_json: Path,
+    raw_dir: Path,
+    out_dir: Path,
+) -> list[dict[str, object]]:
+    batches = split_batches(frames_to_run, args.frame_batch_size)
+    write_frames_json(frames_json, frames_to_run)
+    if len(batches) == 1:
+        batch_json_paths = [frames_json]
+    else:
+        batch_dir = out_dir / "sam3_video_frame_batches"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        batch_json_paths = [batch_dir / f"batch_{idx:04d}.json" for idx in range(len(batches))]
+
+    runs = []
+    for idx, (batch, batch_json) in enumerate(zip(batches, batch_json_paths, strict=True)):
+        write_frames_json(batch_json, batch)
+        max_video_frame_index = max(frame.video_frame_index for frame in batch)
+        sam3_extra_args = build_sam3_wrapper_args(args, max_video_frame_index=max_video_frame_index)
+        print(
+            f"[run_sam3_video_teacher] SAM3 batch {idx + 1}/{len(batches)}: "
+            f"{len(batch)} frames, max_video_frame_index={max_video_frame_index}",
+            file=sys.stderr,
+            flush=True,
+        )
+        run_sam3_video_teacher(
+            video=args.video,
+            prompt_config=args.prompt_config,
+            frames_json=batch_json,
+            output_dir=raw_dir,
+            sam3_video_script=args.sam3_video_script,
+            conda_env=args.sam3_conda_env,
+            conda_prefix=args.sam3_conda_prefix,
+            extra_args=sam3_extra_args,
+        )
+        runs.append(
+            {
+                "batch_index": idx,
+                "frames": len(batch),
+                "first_frame_id": batch[0].frame_id,
+                "last_frame_id": batch[-1].frame_id,
+                "frames_json": str(batch_json),
+                "max_video_frame_index": max_video_frame_index,
+            }
+        )
+    return runs
+
+
+def build_sam3_wrapper_args(args: argparse.Namespace, *, max_video_frame_index: int) -> list[str]:
+    sam3_extra_args = ["--max-video-frame-index", str(max_video_frame_index)]
+    if args.sam3_root is not None:
+        sam3_extra_args.extend(["--sam3-root", args.sam3_root])
+    if args.sam3_model_path is not None:
+        sam3_extra_args.extend(["--sam3-model-path", args.sam3_model_path])
+    sam3_extra_args.extend(args.sam3_wrapper_arg)
+    return sam3_extra_args
+
+
+def split_batches(frames: list[Sam3VideoFrame], batch_size: int | None) -> list[list[Sam3VideoFrame]]:
+    if batch_size is None:
+        return [frames]
+    return [frames[start : start + batch_size] for start in range(0, len(frames), batch_size)]
 
 
 def resolve_raw_npz(raw_dir: Path, frame: Sam3VideoFrame) -> Path:
@@ -205,6 +264,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sam3-model-path", default=None, help="Optional local facebook/sam3.1 model directory, passed to the wrapper.")
     p.add_argument("--sam3-wrapper-arg", action="append", default=[], help="Extra argument passed to the SAM3 video wrapper.")
     p.add_argument("--max-frames", type=int, default=None, help="Process only the first N synced frames from camera_frame_manifest.json.")
+    p.add_argument(
+        "--frame-batch-size",
+        "--sam3-frame-batch-size",
+        dest="frame_batch_size",
+        type=int,
+        default=None,
+        help="Run SAM3 in separate sequential processes, each processing at most N selected synced frames.",
+    )
     p.add_argument("--min-score", type=float, default=0.7)
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--validate", action="store_true")
