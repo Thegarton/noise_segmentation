@@ -52,6 +52,11 @@ def main() -> None:
         if args.overwrite or (not final_outputs_exist(out_dir, frame) and not resolve_raw_npz(raw_dir, frame).is_file())
     ]
 
+    project_classes = load_semantic_classes(args.classes_yaml)
+    label_to_id = labels_to_ids_from_prompt_config(args.classes_yaml, args.prompt_config)
+    class_names = class_names_from_mapping(project_classes)
+    exported_by_frame_id = {}
+
     frames_json = out_dir / "sam3_video_frames.json"
     sam3_runs = []
     if frames_to_run:
@@ -61,86 +66,194 @@ def main() -> None:
             frames_json=frames_json,
             raw_dir=raw_dir,
             out_dir=out_dir,
+            on_batch_complete=lambda batch: export_frames(
+                batch,
+                args=args,
+                out_dir=out_dir,
+                raw_dir=raw_dir,
+                project_classes=project_classes,
+                label_to_id=label_to_id,
+                class_names=class_names,
+                exported_by_frame_id=exported_by_frame_id,
+            ),
         )
     elif not frames_json.is_file():
         write_frames_json(frames_json, frames)
 
-    project_classes = load_semantic_classes(args.classes_yaml)
-    label_to_id = labels_to_ids_from_prompt_config(args.classes_yaml, args.prompt_config)
-    class_names = class_names_from_mapping(project_classes)
-
-    exported = []
     for frame in frames:
-        frame_out = out_dir / frame.frame_id
-        semantic_path = frame_out / "semantic_mask.npy"
-        confidence_path = frame_out / "confidence.npy"
-        metadata_path = frame_out / "metadata.json"
-        if final_outputs_exist(out_dir, frame) and not args.overwrite:
-            exported.append({"frame_id": frame.frame_id, "status": "exists", "metadata": str(metadata_path)})
+        if frame.frame_id in exported_by_frame_id:
             continue
+        if final_outputs_exist(out_dir, frame) and not args.overwrite:
+            exported_by_frame_id[frame.frame_id] = export_existing_frame(out_dir, frame)
+            continue
+        exported_by_frame_id[frame.frame_id] = export_frame(
+            frame,
+            args=args,
+            out_dir=out_dir,
+            raw_dir=raw_dir,
+            project_classes=project_classes,
+            label_to_id=label_to_id,
+            class_names=class_names,
+        )
 
-        raw_npz = resolve_raw_npz(raw_dir, frame)
-        if not raw_npz.is_file():
-            raise FileNotFoundError(
-                f"SAM3 video wrapper did not write a result for frame_id={frame.frame_id}. "
-                f"Expected {raw_dir / (frame.frame_id + '.npz')} or {raw_dir / frame.frame_id / 'sam3_video.npz'}"
-            )
+    exported = [exported_by_frame_id[frame.frame_id] for frame in frames]
+    write_run_manifest(
+        args=args,
+        out_dir=out_dir,
+        frames_json=frames_json,
+        raw_dir=raw_dir,
+        frames=frames,
+        sam3_runs=sam3_runs,
+        exported=exported,
+    )
 
-        result = load_sam3_video_result(raw_npz)
-        if args.validate:
-            load_sam3_video_result(raw_npz)
-        semantic = sam3_video_to_semantic_mask(result, label_to_id=label_to_id, min_score=args.min_score)
 
-        frame_out.mkdir(parents=True, exist_ok=True)
-        final_npz = frame_out / "sam3_video.npz"
-        shutil.copy2(raw_npz, final_npz)
-        np.save(semantic_path, semantic.semantic_mask.astype(np.uint16, copy=False))
-        np.save(confidence_path, semantic.confidence.astype(np.float32, copy=False))
+def export_frames(
+    frames: list[Sam3VideoFrame],
+    *,
+    args: argparse.Namespace,
+    out_dir: Path,
+    raw_dir: Path,
+    project_classes: dict[str, int],
+    label_to_id: dict[str, int],
+    class_names: list[str],
+    exported_by_frame_id: dict[str, dict[str, object]],
+) -> None:
+    for frame in frames:
+        exported_by_frame_id[frame.frame_id] = export_frame(
+            frame,
+            args=args,
+            out_dir=out_dir,
+            raw_dir=raw_dir,
+            project_classes=project_classes,
+            label_to_id=label_to_id,
+            class_names=class_names,
+        )
 
-        image_copy = copy_frame_image(frame.image_path, frame_out / "image.jpg")
-        overlay_path = frame_out / "overlay.jpg"
-        overlay_written = False
-        overlay_error = None
-        if frame.image_path is not None:
-            try:
-                overlay_written = save_semantic_overlay(frame.image_path, overlay_path, semantic_mask=semantic.semantic_mask)
-            except ImportError as exc:
-                overlay_error = str(exc)
 
-        metadata = {
-            "version": 1,
-            "frame_id": frame.frame_id,
-            "provenance": "sam3_video_teacher",
-            "pseudo_label_version": "sam3_video_teacher_v1",
-            "video": str(Path(args.video)),
-            "video_frame_index": frame.video_frame_index,
-            "lidar_timestamp_us": frame.lidar_timestamp_us,
-            "video_timestamp_us": frame.video_timestamp_us,
-            "delta_ms": frame.delta_ms,
-            "image_path": frame.image_path,
-            "image_copy": image_copy,
-            "sam3_video_npz": str(final_npz),
-            "semantic_mask": str(semantic_path),
-            "confidence_mask": str(confidence_path),
-            "overlay": str(overlay_path) if overlay_written else None,
-            "overlay_error": overlay_error,
-            "prompt_config": str(Path(args.prompt_config)),
-            "classes_yaml": str(Path(args.classes_yaml)),
-            "semantic_classes": project_classes,
-            "class_names": class_names,
-            "min_score": float(args.min_score),
-            "accepted_instances": semantic.accepted_instances,
-            "ignored_instances": semantic.ignored_instances,
-            "unknown_labels": semantic.unknown_labels,
-            "class_pixel_counts": semantic.class_pixel_counts,
-            "sam3_conda_env": args.sam3_conda_env if args.sam3_conda_prefix is None else None,
-            "sam3_conda_prefix": args.sam3_conda_prefix,
-            "sam3_root": args.sam3_root,
-            "sam3_model_path": args.sam3_model_path,
-        }
-        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-        exported.append({"frame_id": frame.frame_id, "status": "created", "metadata": str(metadata_path)})
+def export_frame(
+    frame: Sam3VideoFrame,
+    *,
+    args: argparse.Namespace,
+    out_dir: Path,
+    raw_dir: Path,
+    project_classes: dict[str, int],
+    label_to_id: dict[str, int],
+    class_names: list[str],
+) -> dict[str, object]:
+    frame_out = out_dir / frame.frame_id
+    semantic_path = frame_out / "semantic_mask.npy"
+    confidence_path = frame_out / "confidence.npy"
+    metadata_path = frame_out / "metadata.json"
+    raw_npz = resolve_raw_npz(raw_dir, frame)
+    if not raw_npz.is_file():
+        raise FileNotFoundError(
+            f"SAM3 video wrapper did not write a result for frame_id={frame.frame_id}. "
+            f"Expected {raw_dir / (frame.frame_id + '.npz')} or {raw_dir / frame.frame_id / 'sam3_video.npz'}"
+        )
 
+    result = load_sam3_video_result(raw_npz)
+    if args.validate:
+        load_sam3_video_result(raw_npz)
+    semantic = sam3_video_to_semantic_mask(result, label_to_id=label_to_id, min_score=args.min_score)
+
+    frame_out.mkdir(parents=True, exist_ok=True)
+    final_npz = frame_out / "sam3_video.npz"
+    shutil.copy2(raw_npz, final_npz)
+    np.save(semantic_path, semantic.semantic_mask.astype(np.uint16, copy=False))
+    np.save(confidence_path, semantic.confidence.astype(np.float32, copy=False))
+
+    image_copy = copy_frame_image(frame.image_path, frame_out / "image.jpg")
+    overlay_path = frame_out / "overlay.jpg"
+    overlay_written, overlay_error = write_overlay_for_frame(
+        source_image=frame.image_path,
+        local_image=frame_out / "image.jpg",
+        overlay_path=overlay_path,
+        semantic_mask=semantic.semantic_mask,
+    )
+
+    metadata = {
+        "version": 1,
+        "frame_id": frame.frame_id,
+        "provenance": "sam3_video_teacher",
+        "pseudo_label_version": "sam3_video_teacher_v1",
+        "video": str(Path(args.video)),
+        "video_frame_index": frame.video_frame_index,
+        "lidar_timestamp_us": frame.lidar_timestamp_us,
+        "video_timestamp_us": frame.video_timestamp_us,
+        "delta_ms": frame.delta_ms,
+        "image_path": frame.image_path,
+        "image_copy": image_copy,
+        "sam3_video_npz": str(final_npz),
+        "semantic_mask": str(semantic_path),
+        "confidence_mask": str(confidence_path),
+        "overlay": str(overlay_path) if overlay_written else None,
+        "overlay_error": overlay_error,
+        "prompt_config": str(Path(args.prompt_config)),
+        "classes_yaml": str(Path(args.classes_yaml)),
+        "semantic_classes": project_classes,
+        "class_names": class_names,
+        "min_score": float(args.min_score),
+        "accepted_instances": semantic.accepted_instances,
+        "ignored_instances": semantic.ignored_instances,
+        "unknown_labels": semantic.unknown_labels,
+        "class_pixel_counts": semantic.class_pixel_counts,
+        "sam3_conda_env": args.sam3_conda_env if args.sam3_conda_prefix is None else None,
+        "sam3_conda_prefix": args.sam3_conda_prefix,
+        "sam3_root": args.sam3_root,
+        "sam3_model_path": args.sam3_model_path,
+    }
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"frame_id": frame.frame_id, "status": "created", "metadata": str(metadata_path)}
+
+
+def export_existing_frame(out_dir: Path, frame: Sam3VideoFrame) -> dict[str, object]:
+    frame_out = out_dir / frame.frame_id
+    metadata_path = frame_out / "metadata.json"
+    overlay_path = frame_out / "overlay.jpg"
+    semantic_path = frame_out / "semantic_mask.npy"
+    if not overlay_path.is_file() and semantic_path.is_file():
+        semantic_mask = np.load(semantic_path)
+        overlay_written, overlay_error = write_overlay_for_frame(
+            source_image=frame.image_path,
+            local_image=frame_out / "image.jpg",
+            overlay_path=overlay_path,
+            semantic_mask=semantic_mask,
+        )
+        if metadata_path.is_file():
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["overlay"] = str(overlay_path) if overlay_written else metadata.get("overlay")
+            metadata["overlay_error"] = overlay_error
+            metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"frame_id": frame.frame_id, "status": "exists", "metadata": str(metadata_path)}
+
+
+def write_overlay_for_frame(
+    *,
+    source_image: str | None,
+    local_image: Path,
+    overlay_path: Path,
+    semantic_mask: np.ndarray,
+) -> tuple[bool, str | None]:
+    image_path = source_image if source_image is not None else str(local_image) if local_image.is_file() else None
+    if image_path is None:
+        return False, "No image_path in camera_frame_manifest.json and no local image.jpg"
+    try:
+        return save_semantic_overlay(image_path, overlay_path, semantic_mask=semantic_mask), None
+    except (ImportError, ValueError) as exc:
+        return False, str(exc)
+
+
+def write_run_manifest(
+    *,
+    args: argparse.Namespace,
+    out_dir: Path,
+    frames_json: Path,
+    raw_dir: Path,
+    frames: list[Sam3VideoFrame],
+    sam3_runs: list[dict[str, object]],
+    exported: list[dict[str, object]],
+) -> None:
     manifest = {
         "version": 1,
         "video": str(Path(args.video)),
@@ -170,6 +283,7 @@ def run_sam3_batches(
     frames_json: Path,
     raw_dir: Path,
     out_dir: Path,
+    on_batch_complete,
 ) -> list[dict[str, object]]:
     batches = split_batches(frames_to_run, args.frame_batch_size)
     write_frames_json(frames_json, frames_to_run)
@@ -201,6 +315,7 @@ def run_sam3_batches(
             conda_prefix=args.sam3_conda_prefix,
             extra_args=sam3_extra_args,
         )
+        on_batch_complete(batch)
         runs.append(
             {
                 "batch_index": idx,
