@@ -44,12 +44,18 @@ class ImageResult:
     image_size: tuple[int, int]
     instances: int
     class_pixel_counts: dict[str, int]
+    projection_path: str | None = None
+    mask_projection_path: str | None = None
+    projection_error: str | None = None
 
 
 def main() -> None:
     args = parse_args()
     image_dir = Path(args.image_dir).expanduser().resolve()
     out_dir = Path(args.out_dir).expanduser().resolve()
+    projection_dir = Path(args.projection_dir).expanduser().resolve() if args.projection_dir else None
+    if projection_dir is not None and not projection_dir.is_dir():
+        raise FileNotFoundError(f"Projection directory does not exist: {projection_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     image_paths = collect_images(image_dir, recursive=args.recursive)
@@ -81,7 +87,15 @@ def main() -> None:
     for index, image_path in enumerate(image_paths, start=1):
         frame_out = output_dir_for_image(out_dir, image_dir, image_path, recursive=args.recursive)
         if outputs_exist(frame_out) and not args.overwrite:
+            projection_info = maybe_save_existing_mask_projection(
+                image_path=image_path,
+                frame_out=frame_out,
+                projection_dir=projection_dir,
+                require_projection=args.require_projection,
+            )
             metadata_path = frame_out / "metadata.json"
+            if projection_info and metadata_path.is_file():
+                update_metadata(metadata_path, projection_info)
             results.append(
                 {
                     "image": str(image_path),
@@ -102,6 +116,8 @@ def main() -> None:
             label_to_id=label_to_id,
             min_score=args.min_score,
             prompt_log=args.prompt_log,
+            projection_dir=projection_dir,
+            require_projection=args.require_projection,
         )
         metadata = {
             "version": 1,
@@ -115,6 +131,10 @@ def main() -> None:
             "min_score": float(args.min_score),
             "instances": result.instances,
             "class_pixel_counts": result.class_pixel_counts,
+            "projection_dir": str(projection_dir) if projection_dir is not None else None,
+            "projection_path": result.projection_path,
+            "mask_projection": result.mask_projection_path,
+            "projection_error": result.projection_error,
         }
         (frame_out / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         if args.validate:
@@ -138,6 +158,8 @@ def main() -> None:
         "classes_yaml": str(Path(args.classes_yaml)),
         "sam3_root": str(sam3_root) if sam3_root is not None else None,
         "sam3_model_path": str(model_dir) if model_dir is not None else None,
+        "projection_dir": str(projection_dir) if projection_dir is not None else None,
+        "require_projection": bool(args.require_projection),
         "min_score": float(args.min_score),
         "images": len(image_paths),
         "prompts": len(flat_prompts),
@@ -159,6 +181,8 @@ def process_image(
     label_to_id: dict[str, int],
     min_score: float,
     prompt_log: bool,
+    projection_dir: Path | None,
+    require_projection: bool,
 ) -> ImageResult:
     from PIL import Image  # noqa: WPS433
 
@@ -200,13 +224,15 @@ def process_image(
         label_to_id=label_to_id,
         shape=(height, width),
     )
-    save_image_outputs(
+    projection_info = save_image_outputs(
         image=image,
         image_path=image_path,
         output_dir=output_dir,
         instances=instances,
         semantic_mask=semantic_mask,
         confidence=confidence,
+        projection_dir=projection_dir,
+        require_projection=require_projection,
     )
     return ImageResult(
         image_path=image_path,
@@ -214,6 +240,9 @@ def process_image(
         image_size=(width, height),
         instances=len(instances),
         class_pixel_counts=class_pixel_counts,
+        projection_path=projection_info.get("projection_path"),
+        mask_projection_path=projection_info.get("mask_projection"),
+        projection_error=projection_info.get("projection_error"),
     )
 
 
@@ -277,7 +306,9 @@ def save_image_outputs(
     instances: list[Sam3Instance],
     semantic_mask: np.ndarray,
     confidence: np.ndarray,
-) -> None:
+    projection_dir: Path | None = None,
+    require_projection: bool = False,
+) -> dict[str, str | None]:
     from PIL import Image  # noqa: WPS433
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -291,6 +322,15 @@ def save_image_outputs(
     Image.fromarray(overlay).save(output_dir / "overlay.jpg", quality=95)
     Image.fromarray(semantic_color).save(output_dir / "semantic_color.png")
     Image.fromarray(make_preview(image_np, semantic_color, overlay)).save(output_dir / "preview.jpg", quality=95)
+    projection_info = save_mask_projection_preview(
+        image_path=image_path,
+        output_dir=output_dir,
+        projection_dir=projection_dir,
+        image_np=image_np,
+        semantic_color=semantic_color,
+        overlay=overlay,
+        require_projection=require_projection,
+    )
     image.save(output_dir / "image.jpg", quality=95)
 
     instances_json = [
@@ -305,6 +345,125 @@ def save_image_outputs(
     ]
     (output_dir / "instances.json").write_text(json.dumps(instances_json, ensure_ascii=False, indent=2), encoding="utf-8")
     (output_dir / "source_image.txt").write_text(str(image_path), encoding="utf-8")
+    return projection_info
+
+
+def maybe_save_existing_mask_projection(
+    *,
+    image_path: Path,
+    frame_out: Path,
+    projection_dir: Path | None,
+    require_projection: bool,
+) -> dict[str, str | None] | None:
+    if projection_dir is None:
+        return None
+    mask_projection_path = frame_out / "mask_projection.jpg"
+    if mask_projection_path.is_file():
+        return None
+    semantic_path = frame_out / "semantic_mask.npy"
+    local_image_path = frame_out / "image.jpg"
+    if not semantic_path.is_file() or not local_image_path.is_file():
+        return None
+
+    from PIL import Image  # noqa: WPS433
+
+    semantic_mask = np.load(semantic_path)
+    image_np = np.asarray(Image.open(local_image_path).convert("RGB"), dtype=np.uint8)
+    semantic_color = make_semantic_color(semantic_mask)
+    overlay = make_overlay(image_np, semantic_mask)
+    return save_mask_projection_preview(
+        image_path=image_path,
+        output_dir=frame_out,
+        projection_dir=projection_dir,
+        image_np=image_np,
+        semantic_color=semantic_color,
+        overlay=overlay,
+        require_projection=require_projection,
+    )
+
+
+def save_mask_projection_preview(
+    *,
+    image_path: Path,
+    output_dir: Path,
+    projection_dir: Path | None,
+    image_np: np.ndarray,
+    semantic_color: np.ndarray,
+    overlay: np.ndarray,
+    require_projection: bool,
+) -> dict[str, str | None]:
+    if projection_dir is None:
+        return {"projection_path": None, "mask_projection": None, "projection_error": None}
+
+    projection_path = find_projection_for_image(projection_dir, image_path)
+    if projection_path is None:
+        message = f"Projection image for {image_path.stem!r} was not found in {projection_dir}"
+        if require_projection:
+            raise FileNotFoundError(message)
+        return {"projection_path": None, "mask_projection": None, "projection_error": message}
+
+    from PIL import Image  # noqa: WPS433
+
+    projection = Image.open(projection_path).convert("RGB")
+    target_size = (image_np.shape[1], image_np.shape[0])
+    if projection.size != target_size:
+        projection = projection.resize(target_size)
+    preview = make_labeled_triptych(
+        [
+            ("semantic class id", semantic_color),
+            ("overlay", overlay),
+            ("projection", np.asarray(projection, dtype=np.uint8)),
+        ]
+    )
+    output_path = output_dir / "mask_projection.jpg"
+    Image.fromarray(preview).save(output_path, quality=95)
+    return {"projection_path": str(projection_path), "mask_projection": str(output_path), "projection_error": None}
+
+
+def find_projection_for_image(projection_dir: Path, image_path: Path) -> Path | None:
+    stem = image_path.stem
+    candidates = []
+    preferred = projection_dir / f"{stem}{image_path.suffix.lower()}"
+    if preferred.is_file():
+        return preferred
+    for suffix in sorted(IMAGE_SUFFIXES):
+        candidate = projection_dir / f"{stem}{suffix}"
+        if candidate.is_file():
+            candidates.append(candidate)
+    if candidates:
+        return sorted(candidates)[0]
+    recursive_candidates = sorted(path for path in projection_dir.rglob(f"{stem}.*") if path.suffix.lower() in IMAGE_SUFFIXES)
+    return recursive_candidates[0] if recursive_candidates else None
+
+
+def make_labeled_triptych(panels: list[tuple[str, np.ndarray]]) -> np.ndarray:
+    from PIL import Image, ImageDraw  # noqa: WPS433
+
+    label_height = 32
+    separator_width = 8
+    pil_panels = []
+    for title, panel in panels:
+        image = Image.fromarray(np.asarray(panel, dtype=np.uint8)).convert("RGB")
+        canvas = Image.new("RGB", (image.width, image.height + label_height), (255, 255, 255))
+        canvas.paste(image, (0, label_height))
+        draw = ImageDraw.Draw(canvas)
+        draw.text((8, 8), title, fill=(0, 0, 0))
+        pil_panels.append(canvas)
+
+    height = max(panel.height for panel in pil_panels)
+    width = sum(panel.width for panel in pil_panels) + separator_width * (len(pil_panels) - 1)
+    combined = Image.new("RGB", (width, height), (255, 255, 255))
+    x = 0
+    for panel in pil_panels:
+        combined.paste(panel, (x, 0))
+        x += panel.width + separator_width
+    return np.asarray(combined, dtype=np.uint8)
+
+
+def update_metadata(metadata_path: Path, values: dict[str, str | None]) -> None:
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.update(values)
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def save_instances_npz(path: Path, instances: list[Sam3Instance], *, shape: tuple[int, int]) -> None:
@@ -536,6 +695,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-images", type=int, default=None, help="Optional smoke-test limit.")
     parser.add_argument("--max-prompts", type=int, default=None, help="Optional smoke-test prompt limit per image.")
     parser.add_argument("--recursive", action="store_true", help="Read images recursively and mirror the relative output tree.")
+    parser.add_argument(
+        "--projection-dir",
+        default=None,
+        help="Optional directory with LiDAR point projection images matched to camera images by file stem.",
+    )
+    parser.add_argument(
+        "--require-projection",
+        action="store_true",
+        help="Fail if --projection-dir is set and a matching projection image is missing.",
+    )
     parser.add_argument("--use-fa3", action="store_true", help="Enable FlashAttention 3. Disabled by default.")
     parser.add_argument("--prompt-log", action="store_true", help="Print every prompt for every image.")
     parser.add_argument("--overwrite", action="store_true")

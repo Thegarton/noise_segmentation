@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 
 def test_collect_images_non_recursive_sorted(tmp_path: Path):
@@ -59,6 +60,45 @@ def test_build_semantic_outputs_keeps_highest_score():
     assert confidence[0, 0] == np.float32(0.8)
     assert confidence[0, 1] == np.float32(0.9)
     assert counts == {"TRUCK_BUS": 1, "CAR": 1}
+
+
+def test_projection_is_matched_by_image_stem(tmp_path: Path):
+    script = load_script()
+    image_path = tmp_path / "images" / "000001.jpg"
+    projection_dir = tmp_path / "projection"
+    image_path.parent.mkdir()
+    projection_dir.mkdir()
+    image_path.write_bytes(b"")
+    expected = projection_dir / "000001.png"
+    expected.write_bytes(b"")
+
+    assert script.find_projection_for_image(projection_dir, image_path) == expected
+
+
+def test_save_mask_projection_preview(tmp_path: Path):
+    script = load_script()
+    image_path = tmp_path / "images" / "000000.jpg"
+    projection_dir = tmp_path / "projection"
+    output_dir = tmp_path / "out"
+    image_path.parent.mkdir()
+    projection_dir.mkdir()
+    output_dir.mkdir()
+    Image.fromarray(np.full((2, 3, 3), 10, dtype=np.uint8)).save(image_path)
+    Image.fromarray(np.full((2, 3, 3), 200, dtype=np.uint8)).save(projection_dir / "000000.jpg")
+
+    info = script.save_mask_projection_preview(
+        image_path=image_path,
+        output_dir=output_dir,
+        projection_dir=projection_dir,
+        image_np=np.full((2, 3, 3), 10, dtype=np.uint8),
+        semantic_color=np.full((2, 3, 3), 30, dtype=np.uint8),
+        overlay=np.full((2, 3, 3), 50, dtype=np.uint8),
+        require_projection=True,
+    )
+
+    assert Path(info["projection_path"]).name == "000000.jpg"
+    assert Path(info["mask_projection"]).is_file()
+    assert info["projection_error"] is None
 
 
 def load_script():
