@@ -5,6 +5,7 @@ import argparse
 import inspect
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,32 +24,54 @@ def main() -> None:
     requested_frames = load_requested_frames(args.frames_json)
     if not requested_frames:
         raise ValueError(f"No frames requested in {args.frames_json}")
-    empty_mask_shape = read_resource_shape(args.video)
+    log(f"requested frames: {len(requested_frames)}")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    session_resource_path = str(args.video)
+    session_frames = requested_frames
+    limited_resource_summary: dict[str, Any] | None = None
+    if not args.use_original_video_resource:
+        session_resource_path, session_frames, limited_resource_summary = prepare_limited_video_resource(
+            video=args.video,
+            requested_frames=requested_frames,
+            output_dir=output_dir,
+        )
+        log(
+            "limited SAM3 resource: "
+            f"{limited_resource_summary['frames']} frames from {limited_resource_summary['source']} "
+            f"at {limited_resource_summary['resource_path']}"
+        )
+    else:
+        log("using original video resource; SAM3 may decode/cache the full video")
+    empty_mask_shape = read_resource_shape(session_resource_path)
 
+    log(f"building SAM3 predictor, use_fa3={args.use_fa3}")
     predictor = build_local_or_default_predictor(
         sam3_model_builder,
         sam3_model_path=args.sam3_model_path,
         sam3_root=args.sam3_root,
+        use_fa3=args.use_fa3,
     )
+    log("starting SAM3 session")
     response = predictor.handle_request(
         request={
             "type": "start_session",
-            "resource_path": str(args.video),
+            "resource_path": str(session_resource_path),
         }
     )
     session_id = response["session_id"]
+    log(f"SAM3 session started: {session_id}")
 
     frame_results: dict[str, list[dict[str, Any]]] = {frame["frame_id"]: [] for frame in requested_frames}
     frame_index_to_ids: dict[int, list[str]] = {}
-    for frame in requested_frames:
+    for frame in session_frames:
         frame_index_to_ids.setdefault(int(frame["video_frame_index"]), []).append(str(frame["frame_id"]))
 
     try:
         for label, label_prompts in prompts.items():
             for prompt in label_prompts:
+                log(f"prompt label={label!r} text={prompt!r}")
                 reset_session(predictor, session_id)
                 add_text_prompt(
                     predictor,
@@ -79,6 +102,7 @@ def main() -> None:
                     if not remaining_frame_indices:
                         break
     finally:
+        log("closing SAM3 session")
         close_session(predictor, session_id)
 
     written = []
@@ -88,11 +112,23 @@ def main() -> None:
         write_frame_npz(out_path, frame_results[frame_id], empty_mask_shape=empty_mask_shape)
         written.append({"frame_id": frame_id, "path": str(out_path), "instances": len(frame_results[frame_id])})
 
-    manifest = {"version": 1, "video": str(args.video), "frames": written}
+    manifest = {
+        "version": 1,
+        "video": str(args.video),
+        "session_resource_path": str(session_resource_path),
+        "limited_resource": limited_resource_summary,
+        "use_fa3": bool(args.use_fa3),
+        "frames": written,
+    }
     (output_dir / "sam3_31_video_wrapper_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    log(f"wrote {len(written)} frame outputs")
+
+
+def log(message: str) -> None:
+    print(f"[sam3_31_video_wrapper] {message}", file=sys.stderr, flush=True)
 
 
 def reset_session(predictor: Any, session_id: str) -> None:
@@ -124,11 +160,17 @@ def close_session(predictor: Any, session_id: str) -> None:
     predictor.handle_request(request={"type": "close_session", "session_id": session_id})
 
 
-def build_local_or_default_predictor(model_builder_module: Any, *, sam3_model_path: str | None, sam3_root: str | None) -> Any:
+def build_local_or_default_predictor(
+    model_builder_module: Any,
+    *,
+    sam3_model_path: str | None,
+    sam3_root: str | None,
+    use_fa3: bool,
+) -> Any:
     builder = model_builder_module.build_sam3_multiplex_video_predictor
     sam3_model_path = sam3_model_path or infer_local_model_path(sam3_root)
     if sam3_model_path is None:
-        return builder()
+        return call_builder(builder, {"use_fa3": use_fa3})
 
     model_dir = Path(sam3_model_path).expanduser().resolve()
     config_path = model_dir / "config.json"
@@ -159,9 +201,15 @@ def build_local_or_default_predictor(model_builder_module: Any, *, sam3_model_pa
             kwargs[name] = str(model_dir)
             break
 
-    if not kwargs:
-        return builder()
+    if "use_fa3" in params:
+        kwargs["use_fa3"] = bool(use_fa3)
     return builder(**kwargs)
+
+
+def call_builder(builder: Any, kwargs: dict[str, Any]) -> Any:
+    params = inspect.signature(builder).parameters
+    filtered = {key: value for key, value in kwargs.items() if key in params}
+    return builder(**filtered)
 
 
 def infer_local_model_path(sam3_root: str | None) -> str | None:
@@ -264,6 +312,79 @@ def write_frame_npz(path: Path, instances: list[dict[str, Any]], *, empty_mask_s
     np.savez(path, **payload)
 
 
+def prepare_limited_video_resource(
+    *,
+    video: str | Path,
+    requested_frames: list[dict[str, Any]],
+    output_dir: Path,
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    resource_dir = output_dir / "_sam3_limited_frames"
+    if resource_dir.exists():
+        shutil.rmtree(resource_dir)
+    resource_dir.mkdir(parents=True, exist_ok=True)
+
+    use_image_paths = all(frame.get("image_path") and Path(str(frame["image_path"])).is_file() for frame in requested_frames)
+    source = "image_path" if use_image_paths else "video"
+    if use_image_paths:
+        write_limited_frames_from_image_paths(resource_dir, requested_frames)
+    else:
+        write_limited_frames_from_video(resource_dir, video=video, requested_frames=requested_frames)
+
+    session_frames = []
+    for local_index, frame in enumerate(requested_frames):
+        session_frame = dict(frame)
+        session_frame["original_video_frame_index"] = int(frame["video_frame_index"])
+        session_frame["video_frame_index"] = local_index
+        session_frames.append(session_frame)
+
+    summary = {
+        "resource_path": str(resource_dir),
+        "source": source,
+        "frames": len(session_frames),
+        "original_video_frame_indices": [int(frame["video_frame_index"]) for frame in requested_frames],
+    }
+    return str(resource_dir), session_frames, summary
+
+
+def write_limited_frames_from_image_paths(resource_dir: Path, requested_frames: list[dict[str, Any]]) -> None:
+    for local_index, frame in enumerate(requested_frames):
+        src = Path(str(frame["image_path"]))
+        dst = resource_dir / f"{local_index:05d}.jpg"
+        if src.suffix.lower() in {".jpg", ".jpeg"}:
+            shutil.copy2(src, dst)
+            continue
+
+        from PIL import Image  # noqa: WPS433
+
+        with Image.open(src) as image:
+            image.convert("RGB").save(dst, quality=95)
+
+
+def write_limited_frames_from_video(
+    resource_dir: Path,
+    *,
+    video: str | Path,
+    requested_frames: list[dict[str, Any]],
+) -> None:
+    import cv2  # noqa: WPS433
+
+    capture = cv2.VideoCapture(str(video))
+    if not capture.isOpened():
+        raise ValueError(f"Could not open video resource: {video}")
+    try:
+        for local_index, frame in enumerate(requested_frames):
+            source_index = int(frame["video_frame_index"])
+            capture.set(cv2.CAP_PROP_POS_FRAMES, source_index)
+            ok, image = capture.read()
+            if not ok:
+                raise ValueError(f"Could not read video frame {source_index} from {video}")
+            dst = resource_dir / f"{local_index:05d}.jpg"
+            if not cv2.imwrite(str(dst), image, [int(cv2.IMWRITE_JPEG_QUALITY), 95]):
+                raise ValueError(f"Could not write limited SAM3 frame: {dst}")
+    finally:
+        capture.release()
+
+
 def load_requested_frames(path: str | Path) -> list[dict[str, Any]]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     frames = payload.get("frames")
@@ -275,7 +396,10 @@ def load_requested_frames(path: str | Path) -> list[dict[str, Any]]:
             continue
         if "frame_id" not in frame or "video_frame_index" not in frame:
             continue
-        out.append({"frame_id": str(frame["frame_id"]), "video_frame_index": int(frame["video_frame_index"])})
+        row = {"frame_id": str(frame["frame_id"]), "video_frame_index": int(frame["video_frame_index"])}
+        if frame.get("image_path") is not None:
+            row["image_path"] = str(frame["image_path"])
+        out.append(row)
     return out
 
 
@@ -359,6 +483,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sam3-root", default=None, help="Optional path to the SAM3 repository.")
     parser.add_argument("--sam3-model-path", default=None, help="Optional local facebook/sam3.1 HuggingFace model directory.")
     parser.add_argument("--prompt-frame-index", type=int, default=0)
+    parser.add_argument(
+        "--use-fa3",
+        action="store_true",
+        help="Enable FlashAttention 3 in SAM3.1. Disabled by default for wider GPU/dtype compatibility.",
+    )
+    parser.add_argument(
+        "--use-original-video-resource",
+        action="store_true",
+        help="Pass the original video directly to SAM3 instead of building a small requested-frame JPEG folder.",
+    )
     parser.add_argument(
         "--max-video-frame-index",
         type=int,

@@ -298,9 +298,11 @@ while `--sam3-model-path` points to the local HuggingFace `facebook/sam3.1` dire
 an MP4 file or a directory of numbered JPEG frames. Outputs are written as `<out-dir>/<frame_id>/sam3_video.npz`,
 `semantic_mask.npy`, `confidence.npy`, `metadata.json`, and, when the synced image exists, `image.jpg`/`overlay.jpg`.
 Use `--max-frames N` for smoke tests or to keep long videos from processing every synced LiDAR frame at once.
-The runner writes only the first `N` synced LiDAR frames to the SAM3 request JSON and passes the last requested
-`video_frame_index` to the wrapper, so `propagate_in_video` stops after the requested range. Depending on the SAM3
-implementation, `start_session` can still open or index the original video file before propagation starts.
+The runner writes only the first `N` synced LiDAR frames to the SAM3 request JSON. By default the SAM3.1 wrapper
+builds a temporary numbered JPEG folder containing only those requested frames and passes that folder to
+`start_session`, so the model does not decode/cache the full source video. If you need the old full-video behavior,
+pass `--sam3-wrapper-arg=--use-original-video-resource`. FlashAttention 3 is disabled by default for GPU/dtype
+compatibility; pass `--sam3-wrapper-arg=--use-fa3` only on a confirmed compatible SAM3 environment.
 
 Fuse Waymo LitePT masks and SAM3 camera candidates into project-v1 point-wise seed labels. Residual
 points are not automatically converted to `noise`; ambiguous points stay background/ignore or go to review.
