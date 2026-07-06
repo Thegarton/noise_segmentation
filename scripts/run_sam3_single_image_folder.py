@@ -45,6 +45,7 @@ class ImageResult:
     instances: int
     class_pixel_counts: dict[str, int]
     projection_path: str | None = None
+    projection_copy_path: str | None = None
     mask_projection_path: str | None = None
     projection_error: str | None = None
 
@@ -86,7 +87,7 @@ def main() -> None:
     results = []
     for index, image_path in enumerate(image_paths, start=1):
         frame_out = output_dir_for_image(out_dir, image_dir, image_path, recursive=args.recursive)
-        if outputs_exist(frame_out) and not args.overwrite:
+        if outputs_exist(frame_out, projection_enabled=projection_dir is not None) and not args.overwrite:
             projection_info = maybe_save_existing_mask_projection(
                 image_path=image_path,
                 frame_out=frame_out,
@@ -133,6 +134,7 @@ def main() -> None:
             "class_pixel_counts": result.class_pixel_counts,
             "projection_dir": str(projection_dir) if projection_dir is not None else None,
             "projection_path": result.projection_path,
+            "projection_copy": result.projection_copy_path,
             "mask_projection": result.mask_projection_path,
             "projection_error": result.projection_error,
         }
@@ -241,6 +243,7 @@ def process_image(
         instances=len(instances),
         class_pixel_counts=class_pixel_counts,
         projection_path=projection_info.get("projection_path"),
+        projection_copy_path=projection_info.get("projection_copy"),
         mask_projection_path=projection_info.get("mask_projection"),
         projection_error=projection_info.get("projection_error"),
     )
@@ -400,6 +403,7 @@ def save_mask_projection_preview(
         message = f"Projection image for {image_path.stem!r} was not found in {projection_dir}"
         if require_projection:
             raise FileNotFoundError(message)
+        print(f"[run_sam3_single_image_folder] WARNING: {message}", file=sys.stderr, flush=True)
         return {"projection_path": None, "mask_projection": None, "projection_error": message}
 
     from PIL import Image  # noqa: WPS433
@@ -416,8 +420,15 @@ def save_mask_projection_preview(
         ]
     )
     output_path = output_dir / "mask_projection.jpg"
+    projection_output_path = output_dir / "projection.jpg"
     Image.fromarray(preview).save(output_path, quality=95)
-    return {"projection_path": str(projection_path), "mask_projection": str(output_path), "projection_error": None}
+    projection.save(projection_output_path, quality=95)
+    return {
+        "projection_path": str(projection_path),
+        "projection_copy": str(projection_output_path),
+        "mask_projection": str(output_path),
+        "projection_error": None,
+    }
 
 
 def find_projection_for_image(projection_dir: Path, image_path: Path) -> Path | None:
@@ -605,14 +616,17 @@ def output_dir_for_image(out_dir: Path, image_dir: Path, image_path: Path, *, re
     return out_dir / rel.with_suffix("")
 
 
-def outputs_exist(frame_out: Path) -> bool:
-    return (
-        (frame_out / "semantic_mask.npy").is_file()
-        and (frame_out / "confidence.npy").is_file()
-        and (frame_out / "instances.npz").is_file()
-        and (frame_out / "overlay.jpg").is_file()
-        and (frame_out / "metadata.json").is_file()
-    )
+def outputs_exist(frame_out: Path, *, projection_enabled: bool = False) -> bool:
+    required = [
+        frame_out / "semantic_mask.npy",
+        frame_out / "confidence.npy",
+        frame_out / "instances.npz",
+        frame_out / "overlay.jpg",
+        frame_out / "metadata.json",
+    ]
+    if projection_enabled:
+        required.extend([frame_out / "projection.jpg", frame_out / "mask_projection.jpg"])
+    return all(path.is_file() for path in required)
 
 
 def validate_outputs(frame_out: Path) -> None:

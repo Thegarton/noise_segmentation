@@ -97,8 +97,24 @@ def test_save_mask_projection_preview(tmp_path: Path):
     )
 
     assert Path(info["projection_path"]).name == "000000.jpg"
+    assert Path(info["projection_copy"]).is_file()
     assert Path(info["mask_projection"]).is_file()
     assert info["projection_error"] is None
+
+
+def test_outputs_exist_requires_projection_outputs_when_enabled(tmp_path: Path):
+    script = load_script()
+    frame_out = tmp_path / "frame"
+    frame_out.mkdir()
+    for filename in ["semantic_mask.npy", "confidence.npy", "instances.npz", "overlay.jpg", "metadata.json"]:
+        (frame_out / filename).write_bytes(b"")
+
+    assert script.outputs_exist(frame_out)
+    assert not script.outputs_exist(frame_out, projection_enabled=True)
+
+    (frame_out / "projection.jpg").write_bytes(b"")
+    (frame_out / "mask_projection.jpg").write_bytes(b"")
+    assert script.outputs_exist(frame_out, projection_enabled=True)
 
 
 def load_script():

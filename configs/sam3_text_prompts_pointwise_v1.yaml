@@ -24,7 +24,9 @@ roadblock:
   - "roadblock"
   - "road barrier"
 tire:
-  - "tire"
+  - "loose tire on the road"
+  - "detached tire lying on the ground"
+  - "road obstacle tire not attached to a vehicle"
 wheel_chock:
   - "wheel chock"
 thin_vertical_bar:
@@ -33,4 +35,3 @@ thin_horizontal_bar:
   - "thin horizontal bar"
 road_stud:
   - "road stud"
-
