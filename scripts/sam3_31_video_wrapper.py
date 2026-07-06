@@ -13,6 +13,12 @@ from typing import Any
 import numpy as np
 
 
+MASK_KEYS = ("masks", "pred_masks", "out_binary_masks", "video_res_masks", "mask_logits", "out_mask_logits")
+SCORE_KEYS = ("scores", "pred_scores", "object_scores", "out_probs", "ious")
+TRACK_ID_KEYS = ("track_ids", "obj_ids", "out_obj_ids", "object_ids", "ids")
+BOX_KEYS = ("boxes_xyxy", "boxes", "pred_boxes", "out_boxes_xywh")
+
+
 def main() -> None:
     args = parse_args()
     if args.sam3_root:
@@ -84,6 +90,11 @@ def main() -> None:
                     if args.max_video_frame_index is not None and frame_index > args.max_video_frame_index:
                         break
                     if frame_index not in frame_index_to_ids:
+                        continue
+                    if outputs is None or not has_mask_payload(outputs):
+                        remaining_frame_indices.discard(frame_index)
+                        if not remaining_frame_indices:
+                            break
                         continue
                     masks, scores, track_ids, boxes = extract_output_arrays(outputs)
                     for frame_id in frame_index_to_ids[frame_index]:
@@ -233,10 +244,10 @@ def patch_hf_checkpoint_download(model_builder_module: Any, *, checkpoint_path: 
 
 def extract_output_arrays(outputs: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
     if isinstance(outputs, dict):
-        masks = first_present(outputs, ("masks", "pred_masks", "mask_logits", "out_mask_logits"))
-        scores = first_present(outputs, ("scores", "pred_scores", "object_scores", "ious"))
-        track_ids = first_present(outputs, ("track_ids", "obj_ids", "object_ids", "ids"))
-        boxes = first_present(outputs, ("boxes_xyxy", "boxes", "pred_boxes"))
+        masks = first_present(outputs, MASK_KEYS)
+        scores = first_present(outputs, SCORE_KEYS)
+        track_ids = first_present(outputs, TRACK_ID_KEYS)
+        boxes = first_present(outputs, BOX_KEYS)
     elif isinstance(outputs, (tuple, list)) and len(outputs) >= 2:
         track_ids = outputs[0]
         masks = outputs[1]
@@ -251,6 +262,14 @@ def extract_output_arrays(outputs: Any) -> tuple[np.ndarray, np.ndarray, np.ndar
     track_ids_np = None if track_ids is None else normalize_vector(to_numpy(track_ids), count, dtype=np.int64)
     boxes_np = None if boxes is None else normalize_boxes(to_numpy(boxes), count)
     return masks_np, scores_np, track_ids_np, boxes_np
+
+
+def has_mask_payload(outputs: Any) -> bool:
+    if isinstance(outputs, dict):
+        return first_present(outputs, MASK_KEYS) is not None
+    if isinstance(outputs, (tuple, list)) and len(outputs) >= 2:
+        return outputs[1] is not None
+    return False
 
 
 def normalize_masks(value: np.ndarray) -> np.ndarray:
@@ -453,7 +472,7 @@ def load_prompt_config(path: str | Path) -> dict[str, list[str]]:
 
 def first_present(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
     for key in keys:
-        if key in mapping:
+        if key in mapping and mapping[key] is not None:
             return mapping[key]
     return None
 

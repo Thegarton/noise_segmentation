@@ -109,6 +109,24 @@ def test_sam3_video_to_semantic_mask_resolves_overlap_and_low_score():
     assert semantic.ignored_instances == 1
 
 
+def test_sam3_31_wrapper_extracts_real_output_keys():
+    script = load_sam3_31_video_wrapper_script()
+    outputs = {
+        "masks": None,
+        "out_binary_masks": np.asarray([[[True, False], [False, True]]], dtype=bool),
+        "out_probs": np.asarray([0.75], dtype=np.float32),
+        "out_obj_ids": np.asarray([12], dtype=np.int64),
+        "out_boxes_xywh": np.asarray([[0.1, 0.2, 0.3, 0.4]], dtype=np.float32),
+    }
+
+    masks, scores, track_ids, boxes = script.extract_output_arrays(outputs)
+
+    assert masks.shape == (1, 2, 2)
+    assert scores.tolist() == pytest.approx([0.75])
+    assert track_ids.tolist() == [12]
+    np.testing.assert_allclose(boxes, np.asarray([[0.1, 0.2, 0.3, 0.4]], dtype=np.float32))
+
+
 def test_run_sam3_video_teacher_smoke_without_real_conda(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     script = load_run_sam3_video_teacher_script()
     manifest = tmp_path / "camera_frame_manifest.json"
@@ -210,6 +228,15 @@ def test_run_sam3_video_teacher_smoke_without_real_conda(tmp_path: Path, monkeyp
 def load_run_sam3_video_teacher_script():
     script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_sam3_video_teacher.py"
     spec = importlib.util.spec_from_file_location("run_sam3_video_teacher", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_sam3_31_video_wrapper_script():
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "sam3_31_video_wrapper.py"
+    spec = importlib.util.spec_from_file_location("sam3_31_video_wrapper", script_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
