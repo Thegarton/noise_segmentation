@@ -127,23 +127,16 @@ def write_frames_json(path: str | Path, frames: list[Sam3VideoFrame]) -> None:
     payload = {
         "version": 1,
         "frames": [
-            _frame_to_json(frame)
+            {
+                "frame_id": frame.frame_id,
+                "video_frame_index": frame.video_frame_index,
+            }
             for frame in frames
         ],
     }
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _frame_to_json(frame: Sam3VideoFrame) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "frame_id": frame.frame_id,
-        "video_frame_index": frame.video_frame_index,
-    }
-    if frame.image_path is not None:
-        payload["image_path"] = frame.image_path
-    return payload
 
 
 def load_sam3_video_result(path: str | Path) -> Sam3VideoResult:
