@@ -88,6 +88,23 @@ def test_sparse_taxonomy_and_unknown_labels_map_to_dense_training_ids():
     assert remap_source_labels(labels, {2: 0, 10: 1}).tolist() == [0, 1, -1, -1]
 
 
+def test_flat_point_masks_are_accepted_by_finetune_plan(tmp_path: Path):
+    litept_root, labeler_dir, export_dir = make_finetune_inputs(tmp_path, frame_count=5)
+    for mask_path in export_dir.glob("*/semantic_mask.npy"):
+        np.save(mask_path, np.load(mask_path, allow_pickle=False).reshape(-1))
+
+    plan = build_finetune_plan(
+        litept_root=litept_root,
+        export_dir=export_dir,
+        labeler_dir=labeler_dir,
+        output_dir=tmp_path / "fine_tune",
+        val_ratio=0.2,
+        seed=42,
+    )
+
+    assert {tuple(frame.mask_shape) for frame in plan.frames} == {(4,)}
+
+
 def test_split_randomly_selects_validation_frames_deterministically():
     frame_ids = [f"frame_{index:03d}" for index in range(10)]
     train, val = split_frame_ids(frame_ids, val_ratio=0.2, seed=42)

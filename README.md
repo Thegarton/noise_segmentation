@@ -326,9 +326,11 @@ conda run -p /home/a60116606/miniconda3/envs/sam3 python scripts/run_sam3_single
 Each image gets `<out-dir>/<image_stem>/semantic_mask.npy`, `confidence.npy`, `instances.npz`, `instances.json`,
 `overlay.jpg`, `semantic_color.png`, `preview.jpg`, `image.jpg`, and `metadata.json`. If `--projection-dir` is set,
 the script matches projections by file stem, for example `000000.jpg` with `<projection-dir>/000000.jpg`, and writes
-`mask_projection.jpg` with semantic mask, overlay, and LiDAR projection side by side. Add `--require-projection` to
-fail on missing projection files. The script builds the SAM3 predictor once, starts and closes a separate
-single-image session per frame, and applies every text prompt from the prompt config.
+`mask_projection.jpg` with semantic mask, overlay, and LiDAR projection side by side. Image stems ending with
+`_original` also match the shorter projection stem, so `000001_original.jpg` matches `000001.jpg`; add
+`--projection-stem-suffix VALUE` for other suffixes. Add `--require-projection` to fail on missing projection files.
+The script builds the SAM3 predictor once, starts and closes a separate single-image session per frame, and applies
+every text prompt from the prompt config.
 
 Fuse Waymo LitePT masks and SAM3 camera candidates into project-v1 point-wise seed labels. Residual
 points are not automatically converted to `noise`; ambiguous points stay background/ignore or go to review.

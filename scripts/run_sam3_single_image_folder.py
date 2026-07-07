@@ -22,6 +22,7 @@ from autolabeler.teachers.sam3_text_adapter import load_prompt_config  # noqa: E
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+DEFAULT_PROJECTION_STEM_SUFFIXES = ("_original", "_image", "_rgb", "_camera")
 MASK_KEYS = ("masks", "pred_masks", "out_binary_masks", "video_res_masks", "mask_logits", "out_mask_logits")
 SCORE_KEYS = ("scores", "pred_scores", "object_scores", "ious", "obj_scores", "out_probs")
 BOX_KEYS = ("boxes_xyxy", "boxes", "pred_boxes", "out_boxes_xywh")
@@ -92,6 +93,7 @@ def main() -> None:
                 image_path=image_path,
                 frame_out=frame_out,
                 projection_dir=projection_dir,
+                projection_stem_suffixes=tuple(args.projection_stem_suffix),
                 require_projection=args.require_projection,
             )
             metadata_path = frame_out / "metadata.json"
@@ -118,6 +120,7 @@ def main() -> None:
             min_score=args.min_score,
             prompt_log=args.prompt_log,
             projection_dir=projection_dir,
+            projection_stem_suffixes=tuple(args.projection_stem_suffix),
             require_projection=args.require_projection,
         )
         metadata = {
@@ -184,6 +187,7 @@ def process_image(
     min_score: float,
     prompt_log: bool,
     projection_dir: Path | None,
+    projection_stem_suffixes: tuple[str, ...],
     require_projection: bool,
 ) -> ImageResult:
     from PIL import Image  # noqa: WPS433
@@ -234,6 +238,7 @@ def process_image(
         semantic_mask=semantic_mask,
         confidence=confidence,
         projection_dir=projection_dir,
+        projection_stem_suffixes=projection_stem_suffixes,
         require_projection=require_projection,
     )
     return ImageResult(
@@ -310,6 +315,7 @@ def save_image_outputs(
     semantic_mask: np.ndarray,
     confidence: np.ndarray,
     projection_dir: Path | None = None,
+    projection_stem_suffixes: tuple[str, ...] = DEFAULT_PROJECTION_STEM_SUFFIXES,
     require_projection: bool = False,
 ) -> dict[str, str | None]:
     from PIL import Image  # noqa: WPS433
@@ -329,6 +335,7 @@ def save_image_outputs(
         image_path=image_path,
         output_dir=output_dir,
         projection_dir=projection_dir,
+        projection_stem_suffixes=projection_stem_suffixes,
         image_np=image_np,
         semantic_color=semantic_color,
         overlay=overlay,
@@ -356,6 +363,7 @@ def maybe_save_existing_mask_projection(
     image_path: Path,
     frame_out: Path,
     projection_dir: Path | None,
+    projection_stem_suffixes: tuple[str, ...],
     require_projection: bool,
 ) -> dict[str, str | None] | None:
     if projection_dir is None:
@@ -378,6 +386,7 @@ def maybe_save_existing_mask_projection(
         image_path=image_path,
         output_dir=frame_out,
         projection_dir=projection_dir,
+        projection_stem_suffixes=projection_stem_suffixes,
         image_np=image_np,
         semantic_color=semantic_color,
         overlay=overlay,
@@ -390,6 +399,7 @@ def save_mask_projection_preview(
     image_path: Path,
     output_dir: Path,
     projection_dir: Path | None,
+    projection_stem_suffixes: tuple[str, ...] = DEFAULT_PROJECTION_STEM_SUFFIXES,
     image_np: np.ndarray,
     semantic_color: np.ndarray,
     overlay: np.ndarray,
@@ -398,7 +408,11 @@ def save_mask_projection_preview(
     if projection_dir is None:
         return {"projection_path": None, "mask_projection": None, "projection_error": None}
 
-    projection_path = find_projection_for_image(projection_dir, image_path)
+    projection_path = find_projection_for_image(
+        projection_dir,
+        image_path,
+        stem_suffixes=projection_stem_suffixes,
+    )
     if projection_path is None:
         message = f"Projection image for {image_path.stem!r} was not found in {projection_dir}"
         if require_projection:
@@ -431,20 +445,38 @@ def save_mask_projection_preview(
     }
 
 
-def find_projection_for_image(projection_dir: Path, image_path: Path) -> Path | None:
-    stem = image_path.stem
+def find_projection_for_image(
+    projection_dir: Path,
+    image_path: Path,
+    *,
+    stem_suffixes: tuple[str, ...] = DEFAULT_PROJECTION_STEM_SUFFIXES,
+) -> Path | None:
+    stems = projection_stems_for_image(image_path.stem, stem_suffixes=stem_suffixes)
     candidates = []
-    preferred = projection_dir / f"{stem}{image_path.suffix.lower()}"
-    if preferred.is_file():
-        return preferred
-    for suffix in sorted(IMAGE_SUFFIXES):
-        candidate = projection_dir / f"{stem}{suffix}"
-        if candidate.is_file():
-            candidates.append(candidate)
-    if candidates:
-        return sorted(candidates)[0]
-    recursive_candidates = sorted(path for path in projection_dir.rglob(f"{stem}.*") if path.suffix.lower() in IMAGE_SUFFIXES)
-    return recursive_candidates[0] if recursive_candidates else None
+    for stem in stems:
+        preferred = projection_dir / f"{stem}{image_path.suffix.lower()}"
+        if preferred.is_file():
+            return preferred
+        for suffix in sorted(IMAGE_SUFFIXES):
+            candidate = projection_dir / f"{stem}{suffix}"
+            if candidate.is_file():
+                candidates.append(candidate)
+        if candidates:
+            return sorted(candidates)[0]
+        recursive_candidates = sorted(
+            path for path in projection_dir.rglob(f"{stem}.*") if path.suffix.lower() in IMAGE_SUFFIXES
+        )
+        if recursive_candidates:
+            return recursive_candidates[0]
+    return None
+
+
+def projection_stems_for_image(stem: str, *, stem_suffixes: tuple[str, ...]) -> list[str]:
+    stems = [stem]
+    for suffix in stem_suffixes:
+        if suffix and stem.endswith(suffix):
+            stems.append(stem[: -len(suffix)])
+    return list(dict.fromkeys(stems))
 
 
 def make_labeled_triptych(panels: list[tuple[str, np.ndarray]]) -> np.ndarray:
@@ -713,6 +745,15 @@ def parse_args() -> argparse.Namespace:
         "--projection-dir",
         default=None,
         help="Optional directory with LiDAR point projection images matched to camera images by file stem.",
+    )
+    parser.add_argument(
+        "--projection-stem-suffix",
+        action="append",
+        default=list(DEFAULT_PROJECTION_STEM_SUFFIXES),
+        help=(
+            "Image filename suffix to strip when matching projections by stem. "
+            "Defaults include _original, so 000001_original.jpg can match 000001.jpg."
+        ),
     )
     parser.add_argument(
         "--require-projection",

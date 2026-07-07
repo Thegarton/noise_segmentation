@@ -75,6 +75,23 @@ def test_projection_is_matched_by_image_stem(tmp_path: Path):
     assert script.find_projection_for_image(projection_dir, image_path) == expected
 
 
+def test_projection_strips_original_suffix_when_matching(tmp_path: Path):
+    script = load_script()
+    image_path = tmp_path / "images" / "000001_original.jpg"
+    projection_dir = tmp_path / "projection"
+    image_path.parent.mkdir()
+    projection_dir.mkdir()
+    image_path.write_bytes(b"")
+    expected = projection_dir / "000001.jpg"
+    expected.write_bytes(b"")
+
+    assert script.projection_stems_for_image("000001_original", stem_suffixes=("_original",)) == [
+        "000001_original",
+        "000001",
+    ]
+    assert script.find_projection_for_image(projection_dir, image_path) == expected
+
+
 def test_save_mask_projection_preview(tmp_path: Path):
     script = load_script()
     image_path = tmp_path / "images" / "000000.jpg"
