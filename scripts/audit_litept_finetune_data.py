@@ -184,6 +184,7 @@ def audit_frame(
             mask=mask,
             valid_indices=valid_indices,
             segment=segment,
+            frame_strength=normalize_litept_strength(points[valid, 3]).reshape(-1),
             source_to_training=source_to_training,
             id_to_name=id_to_name,
             output_dir=output_dir,
@@ -271,6 +272,7 @@ def inspect_prepared_index(
     mask: np.ndarray,
     valid_indices: np.ndarray,
     segment: np.ndarray,
+    frame_strength: np.ndarray,
     source_to_training: dict[int, int],
     id_to_name: dict[int, str],
     output_dir: Path | None,
@@ -289,7 +291,7 @@ def inspect_prepared_index(
         "expected_training_id": int(source_to_training.get(source_id, -1)),
         "prepared_segment": int(segment[inspect_index]),
         "raw_intensity": float(points[raw_index, 3]),
-        "normalized_strength": float(normalize_litept_strength(points[raw_index : raw_index + 1, 3])[0]),
+        "normalized_strength": float(frame_strength[inspect_index]),
     }
     if output_dir is not None:
         frame_dir = next(
