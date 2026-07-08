@@ -16,6 +16,7 @@ IGNORE_IDS = {0, 255}
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
 DEFAULT_FPS = 10
 DEFAULT_POINT_SIZE = 10
+DEFAULT_CLASS_IDS = (2, 5, 10, 11, 13, 15, 18, 19, 20, 21)
 
 
 def main() -> None:
@@ -23,6 +24,7 @@ def main() -> None:
     labeler_dir = Path(args.labeler_dir).expanduser().resolve()
     export_dir = Path(args.export_dir).expanduser().resolve()
     output_path = Path(args.output).expanduser().resolve()
+    class_ids = parse_class_ids(args.class_ids)
     id_to_name, id_to_color = read_labels_xml(labeler_dir / "labels.xml")
     bridge_manifest = read_json(labeler_dir / "bridge_manifest.json")
     frame_manifest_by_id = {str(frame.get("frame_id")): frame for frame in bridge_manifest.get("frames", [])}
@@ -38,6 +40,7 @@ def main() -> None:
         frame_manifest_by_id=frame_manifest_by_id,
         id_to_name=id_to_name,
         id_to_color=id_to_color,
+        selected_class_ids=class_ids,
         point_size=args.point_size,
         legend_position=args.legend_position,
         legend_mode=args.legend_mode,
@@ -58,6 +61,7 @@ def main() -> None:
                 frame_manifest_by_id=frame_manifest_by_id,
                 id_to_name=id_to_name,
                 id_to_color=id_to_color,
+                selected_class_ids=class_ids,
                 point_size=args.point_size,
                 legend_position=args.legend_position,
                 legend_mode=args.legend_mode,
@@ -80,13 +84,14 @@ def main() -> None:
         "point_size": float(args.point_size),
         "legend_mode": args.legend_mode,
         "legend_position": args.legend_position,
+        "class_ids": class_ids,
         "ignored_class_ids": sorted(IGNORE_IDS),
         "frame_count": written,
         "frame_size": [int(frame_size[0]), int(frame_size[1])],
         "classes": [
             {"id": int(class_id), "name": id_to_name.get(class_id, f"id_{class_id}"), "color": id_to_color[class_id].tolist()}
-            for class_id in sorted(id_to_color)
-            if class_id not in IGNORE_IDS
+            for class_id in class_ids
+            if class_id in id_to_color and class_id not in IGNORE_IDS
         ],
     }
     manifest_path = output_path.with_suffix(".json")
@@ -105,9 +110,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--point-size", type=float, default=DEFAULT_POINT_SIZE)
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument(
+        "--class-ids",
+        default=",".join(str(value) for value in DEFAULT_CLASS_IDS),
+        help="Comma-separated class ids to draw and show in the legend. Default: 2,5,10,11,13,15,18,19,20,21.",
+    )
+    parser.add_argument(
         "--legend-mode",
         choices=("all", "present"),
-        default="present",
+        default="all",
         help="present: show only classes visible in the current frame. all: show all non-background/non-ignore classes from labels.xml.",
     )
     parser.add_argument(
@@ -116,6 +126,19 @@ def parse_args() -> argparse.Namespace:
         default="top-right",
     )
     return parser.parse_args()
+
+
+def parse_class_ids(value: str) -> list[int]:
+    class_ids = []
+    for token in value.replace(";", ",").split(","):
+        token = token.strip()
+        if token:
+            class_id = int(token)
+            if class_id not in IGNORE_IDS:
+                class_ids.append(class_id)
+    if not class_ids:
+        raise ValueError("--class-ids must contain at least one non-background/non-ignore class id")
+    return class_ids
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -168,6 +191,7 @@ def render_frame(
     frame_manifest_by_id: dict[str, dict[str, Any]],
     id_to_name: dict[int, str],
     id_to_color: dict[int, np.ndarray],
+    selected_class_ids: list[int],
     point_size: float,
     legend_position: str,
     legend_mode: str,
@@ -184,9 +208,10 @@ def render_frame(
         cxd=csv_cols["cxd"],
         cyd=csv_cols["cyd"],
         id_to_color=id_to_color,
+        selected_class_ids=selected_class_ids,
         point_size=point_size,
     )
-    legend_ids = legend_class_ids(labels, id_to_color=id_to_color, mode=legend_mode)
+    legend_ids = legend_class_ids(labels, selected_class_ids=selected_class_ids, mode=legend_mode)
     return draw_legend(
         image,
         class_ids=legend_ids,
@@ -303,6 +328,7 @@ def draw_projected_points(
     cxd: np.ndarray,
     cyd: np.ndarray,
     id_to_color: dict[int, np.ndarray],
+    selected_class_ids: list[int],
     point_size: float,
 ) -> Image.Image:
     draw = ImageDraw.Draw(image, "RGBA")
@@ -312,6 +338,7 @@ def draw_projected_points(
     valid = np.isfinite(cxd) & np.isfinite(cyd)
     valid &= (cxd >= 0.0) & (cxd < width) & (cyd >= 0.0) & (cyd < height)
     valid &= ~np.isin(labels, list(IGNORE_IDS))
+    valid &= np.isin(labels, selected_class_ids)
 
     for label_id in sorted(int(value) for value in np.unique(labels[valid])):
         color = id_to_color.get(label_id, stable_color(label_id))
@@ -329,8 +356,8 @@ def stable_color(label_id: int) -> np.ndarray:
     return rng.integers(40, 240, size=3, dtype=np.uint8)
 
 
-def legend_class_ids(labels: np.ndarray, *, id_to_color: dict[int, np.ndarray], mode: str) -> list[int]:
-    available = [class_id for class_id in sorted(id_to_color) if class_id not in IGNORE_IDS]
+def legend_class_ids(labels: np.ndarray, *, selected_class_ids: list[int], mode: str) -> list[int]:
+    available = [class_id for class_id in selected_class_ids if class_id not in IGNORE_IDS]
     if mode == "all":
         return available
     present = {int(value) for value in np.unique(labels) if int(value) not in IGNORE_IDS}
