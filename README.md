@@ -154,6 +154,24 @@ PYTHONPATH=src /home/a60116606/miniconda3/envs/litept/bin/python scripts/run_lit
   --force-torch-pointrope
 ```
 
+9. Fuse LitePT point predictions with SAM3 image predictions.
+
+```bash
+PYTHONPATH=src python scripts/fuse_hl320_point_predictions.py \
+  --csv-dir /path/to/csv_shift_3_1090_1245 \
+  --litept-dir ./output/HL320_litept_from_scratch_inference \
+  --sam3-dir ./output/sam3_single_image_folder \
+  --classes-yaml configs/classes.yaml \
+  --out-dir ./output/HL320_fused_predictions \
+  --min-sam3-confidence 0.7 \
+  --litept-keep-threshold 0.6 \
+  --noise-protect-threshold 0.4 \
+  --sam3-override-margin 0.2 \
+  --overwrite
+```
+
+Fusion is done at point level. SAM3 is lifted to each LiDAR row through `Cxd/Cyd`; no reordering by `slot` or `pixel` is used. A confident LitePT noise label is protected from camera overwrite. SAM3 fills ignored or weak LitePT points and can override non-noise labels only when its confidence is higher by the configured margin.
+
 ## Visualization
 
 Create videos from SAM3 image outputs:
@@ -188,6 +206,8 @@ PYTHONPATH=src python scripts/make_litept_inference_projection_video.py \
   --fps 10
 ```
 
+The same visualization script can be pointed at `./output/HL320_fused_predictions`, because fused output uses the same per-frame `semantic_mask.npy` and `confidence.npy` layout.
+
 ## HL320 Data Contract
 
 The active data contract is flat point-wise HL320 data. A CSV frame should contain at least:
@@ -204,13 +224,13 @@ The important invariants are:
 - background and ignore are distinct labels;
 - `ignore=255` is excluded from loss in training.
 
-## Next Architecture Direction
+## Current HL320 Model Direction
 
-The next implementation stage should be built under an HL320-specific namespace and should train from scratch rather than relying on Waymo/NuScenes checkpoints. The planned dataset representation is:
+The HL320-specific path lives under `src/autolabeler/hl320/` and trains from scratch rather than relying on Waymo/NuScenes checkpoints. The dataset representation is:
 
 - `coord.npy` for XYZ;
 - `features.npy` for intensity, reflectivity, distance, echo metadata, and multi-echo relations;
 - `segment.npy` for dense point labels;
 - `metadata.json` for frame-level provenance and CSV/raw source paths.
 
-SAM3 remains a camera teacher and candidate source. It must not overwrite LiDAR noise classes by itself; noise labels should be protected by LiDAR/multi-echo evidence and temporal consistency.
+SAM3 remains a camera teacher and candidate source. It must not overwrite LiDAR noise classes by itself; the current fusion stage already protects noise labels from camera overwrite, and later versions should add temporal consistency on top of this point-level policy.
