@@ -32,7 +32,20 @@ PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
 
 For video-context SAM3 runs, use `scripts/run_sam3_video_teacher.py`. The main environment does not import SAM3 directly; SAM3 should run through its own Conda environment.
 
-3. Lift SAM3 masks to LiDAR point labels through the existing `Cxd/Cyd` columns:
+3. Build HL320 physics teacher candidates.
+
+```bash
+PYTHONPATH=src python scripts/build_hl320_teacher_candidates.py \
+  --csv-dir /path/to/csv_shift_3_1090_1245 \
+  --classes-yaml configs/classes.yaml \
+  --sam3-dir ./output/sam3_single_image_folder \
+  --out-dir ./output/HL320_teacher_candidates \
+  --overwrite
+```
+
+This stage is a candidate teacher, not final labeling. It preserves CSV row order, groups multi-echo returns by `slot + pixel`, scores LiDAR physics rules, uses neighboring frames for temporal support, and uses SAM3 only as camera object context. Per frame it writes `candidate_mask.npy`, `candidate_confidence.npy`, `candidate_reasons.json`, `features_debug.npz`, and `metadata.json`; the top-level `teacher_candidates/<frame>.npy` mirrors the candidate mask for review tools.
+
+4. Lift SAM3 masks to LiDAR point labels through the existing `Cxd/Cyd` columns:
 
 ```bash
 PYTHONPATH=src python scripts/project_sam3_masks_to_point_labeler.py \
@@ -53,7 +66,7 @@ This creates a point_labeler-compatible dataset with:
 - optional `image_2/<frame>.jpg`;
 - `labels.xml`, `settings.cfg`, and `bridge_manifest.json`.
 
-4. Correct labels manually in point_labeler, then export them:
+5. Correct labels manually in point_labeler, then export them:
 
 ```bash
 cd /home/a60116606/git_repo/point_labeler/scripts
@@ -65,7 +78,7 @@ python3 export_from_point_labeler.py \
 
 Flat HL320 exports use `semantic_mask.npy` with shape `[N]`. The point index is the original CSV row index after invalid points are handled by downstream training.
 
-5. Build the clean HL320 dataset format for the next model stage:
+6. Build the clean HL320 dataset format for the next model stage:
 
 ```bash
 PYTHONPATH=src python scripts/build_hl320_dataset.py \
@@ -82,7 +95,7 @@ This writes `dataset/{train,val}/<frame>/coord.npy`, `features.npy`, `strength.n
 `features.npy` is the explicit HL320 feature matrix. `strength.npy` contains the same matrix because LitePT `DefaultDataset` only loads known asset names.
 `segment.npy` uses dense training ids `0..N-1`; original source ids are preserved in `hl320_dataset_manifest.json`.
 
-6. Train LitePT from scratch on the clean HL320 dataset:
+7. Train LitePT from scratch on the clean HL320 dataset:
 
 ```bash
 PYTHONPATH=src /home/a60116606/miniconda3/envs/litept/bin/python scripts/train_hl320_litept_from_scratch.py \
@@ -105,7 +118,7 @@ PYTHONPATH=src /home/a60116606/miniconda3/envs/litept/bin/python scripts/train_h
 Use `--dry-run` to validate the dataset and config plan without importing PyTorch/CUDA. Use `--prepare-only` to write the LitePT config and manifests without starting training.
 This path does not load a Waymo/NuScenes checkpoint. The LitePT head and backbone are initialized from scratch, and the generated config sets `backbone.in_channels = 3 + len(HL320 features)`.
 
-7. Fine-tune LitePT as the older transition baseline when you specifically want to reuse the Waymo backbone:
+8. Fine-tune LitePT as the older transition baseline when you specifically want to reuse the Waymo backbone:
 
 ```bash
 PYTHONPATH=src /home/a60116606/miniconda3/envs/litept/bin/python scripts/finetune_litept.py \
@@ -126,7 +139,7 @@ PYTHONPATH=src /home/a60116606/miniconda3/envs/litept/bin/python scripts/finetun
   --force-torch-pointrope
 ```
 
-8. Run a trained LitePT model on flat HL320 CSV frames.
+9. Run a trained LitePT model on flat HL320 CSV frames.
 
 For the new from-scratch HL320 model:
 
@@ -154,7 +167,7 @@ PYTHONPATH=src /home/a60116606/miniconda3/envs/litept/bin/python scripts/run_lit
   --force-torch-pointrope
 ```
 
-9. Fuse LitePT point predictions with SAM3 image predictions.
+10. Fuse LitePT point predictions with SAM3 image predictions.
 
 ```bash
 PYTHONPATH=src python scripts/fuse_hl320_point_predictions.py \
@@ -233,4 +246,4 @@ The HL320-specific path lives under `src/autolabeler/hl320/` and trains from scr
 - `segment.npy` for dense point labels;
 - `metadata.json` for frame-level provenance and CSV/raw source paths.
 
-SAM3 remains a camera teacher and candidate source. It must not overwrite LiDAR noise classes by itself; the current fusion stage already protects noise labels from camera overwrite, and later versions should add temporal consistency on top of this point-level policy.
+SAM3 remains a camera teacher and candidate source. It must not overwrite LiDAR noise classes by itself; the physics teacher adds transparent noise candidates with reasons and temporal support, and the fusion stage protects confident LiDAR noise labels from camera overwrite.
