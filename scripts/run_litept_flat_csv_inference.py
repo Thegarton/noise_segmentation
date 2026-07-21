@@ -14,6 +14,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from autolabeler.hl320.csv_points import build_hl320_features, load_hl320_csv  # noqa: E402
 from autolabeler.teachers.litept_adapter import (  # noqa: E402
     LitePTUnavailableError,
     _add_litept_to_path,
@@ -49,6 +50,7 @@ def main() -> None:
                     "litept_root": str(litept_root),
                     "checkpoint": str(checkpoint),
                     "litept_config": str(litept_config),
+                    "feature_mode": args.feature_mode,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -66,6 +68,7 @@ def main() -> None:
         device=args.device,
         force_torch_pointrope=args.force_torch_pointrope,
     )
+    feature_mode = resolve_feature_mode(args.feature_mode, model)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     frames = []
@@ -74,8 +77,8 @@ def main() -> None:
             frames.append({"frame_id": csv_path.stem, "status": "exists"})
             continue
         print(f"[{index:04d}/{len(csv_paths):04d}] {csv_path}", file=sys.stderr, flush=True)
-        frame = load_flat_csv(csv_path)
-        result = predict_flat_points(model, frame["points"])
+        frame = load_inference_frame(csv_path, feature_mode=feature_mode)
+        result = predict_flat_points(model, frame["points"], strength=frame["strength"])
         frame_out = out_dir / frame["frame_id"]
         frame_out.mkdir(parents=True, exist_ok=True)
         np.save(frame_out / "semantic_mask.npy", result["semantic_mask"])
@@ -88,6 +91,7 @@ def main() -> None:
             result=result,
             checkpoint=checkpoint,
             litept_config=litept_config,
+            feature_mode=feature_mode,
         )
         (frame_out / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         frames.append(
@@ -115,6 +119,7 @@ def main() -> None:
         "num_classes": model.num_classes,
         "training_id_to_source_id": model.training_id_to_source_id or list(range(model.num_classes)),
         "output_ignore_index": model.output_ignore_index,
+        "feature_mode": feature_mode,
         "frames": frames,
     }
     manifest_path = out_dir / "litept_flat_csv_inference_manifest.json"
@@ -132,6 +137,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--litept-config", default=None, help="Defaults to <fine-tune-dir>/litept_custom_config.py")
     parser.add_argument("--device", default=None, help="Torch device, e.g. cuda:0")
     parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument(
+        "--feature-mode",
+        choices=("auto", "legacy_intensity", "hl320"),
+        default="auto",
+        help="legacy_intensity uses only XYZI intensity; hl320 uses the same feature matrix as build_hl320_dataset.py.",
+    )
     parser.add_argument("--force-torch-pointrope", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -225,6 +236,21 @@ def load_flat_csv(path: Path) -> dict[str, Any]:
     }
 
 
+def load_inference_frame(path: Path, *, feature_mode: str) -> dict[str, Any]:
+    if feature_mode == "hl320":
+        frame = load_hl320_csv(path)
+        return {
+            "frame_id": frame.frame_id,
+            "points": frame.points,
+            "strength": build_hl320_features(frame),
+            "columns": frame.columns,
+            "optional": frame.fields,
+        }
+    frame = load_flat_csv(path)
+    frame["strength"] = normalize_litept_strength(frame["points"][:, 3]).reshape(-1, 1)
+    return frame
+
+
 def split_table_row(line: str) -> list[str]:
     if "," in line:
         return [value.strip() for value in line.split(",")]
@@ -245,7 +271,24 @@ def parse_float(value: str, source: Path, line_number: int, column: str) -> floa
         raise ValueError(f"{source}:{line_number}: cannot parse {column}={value!r} as float") from exc
 
 
-def predict_flat_points(model: Any, points_xyzi: np.ndarray) -> dict[str, Any]:
+def resolve_feature_mode(requested: str, model: Any) -> str:
+    if requested != "auto":
+        return requested
+    feature_names = getattr(model.cfg, "feature_names", None)
+    in_channels = _model_in_channels(model)
+    if feature_names is not None or in_channels > 4:
+        return "hl320"
+    return "legacy_intensity"
+
+
+def _model_in_channels(model: Any) -> int:
+    try:
+        return int(model.cfg.model.backbone.in_channels)
+    except Exception:
+        return 4
+
+
+def predict_flat_points(model: Any, points_xyzi: np.ndarray, *, strength: np.ndarray | None = None) -> dict[str, Any]:
     try:
         import torch
         import torch.nn.functional as F
@@ -257,6 +300,11 @@ def predict_flat_points(model: Any, points_xyzi: np.ndarray) -> dict[str, Any]:
     points = np.asarray(points_xyzi, dtype=np.float32)
     if points.ndim != 2 or points.shape[1] != 4:
         raise ValueError(f"points_xyzi must have shape [N,4], got {points.shape}")
+    if strength is None:
+        strength = normalize_litept_strength(points[:, 3]).reshape(-1, 1)
+    strength = np.asarray(strength, dtype=np.float32)
+    if strength.ndim != 2 or strength.shape[0] != points.shape[0]:
+        raise ValueError(f"strength must have shape [N,C], got {strength.shape} for {points.shape[0]} points")
     valid = valid_litept_points(points)
     valid_indices = np.flatnonzero(valid)
 
@@ -267,7 +315,7 @@ def predict_flat_points(model: Any, points_xyzi: np.ndarray) -> dict[str, Any]:
 
     data_dict = {
         "coord": points[valid_indices, :3].astype(np.float32, copy=False),
-        "strength": normalize_litept_strength(points[valid_indices, 3]).reshape(-1, 1),
+        "strength": strength[valid_indices].astype(np.float32, copy=False),
         "segment": np.full((valid_indices.size,), -1, dtype=np.int64),
         "index_valid_keys": ["coord", "strength", "segment"],
     }
@@ -307,6 +355,7 @@ def build_metadata(
     result: dict[str, Any],
     checkpoint: Path,
     litept_config: Path,
+    feature_mode: str,
 ) -> dict[str, Any]:
     source_ids = model.training_id_to_source_id or list(range(model.num_classes))
     semantic = np.asarray(result["semantic_mask"])
@@ -325,6 +374,8 @@ def build_metadata(
         "litept_dataset": "custom",
         "litept_config": str(litept_config),
         "checkpoint": str(checkpoint),
+        "feature_mode": feature_mode,
+        "feature_names": list(getattr(model.cfg, "feature_names", [])),
         "class_names": model.class_names,
         "num_classes": model.num_classes,
         "semantic_classes": {name: int(source_id) for name, source_id in zip(model.class_names, source_ids)},

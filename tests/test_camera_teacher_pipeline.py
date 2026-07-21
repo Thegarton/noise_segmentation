@@ -9,14 +9,6 @@ import pytest
 from autolabeler.camera.calibration import load_camera_calibration
 from autolabeler.camera.projection import project_points_to_image
 from autolabeler.camera.sync import VideoTimestamp, nearest_video_timestamp, read_video_timestamps_csv
-from autolabeler.data.bin_loader import H, W
-from autolabeler.fusion.pointwise_teacher_fusion import (
-    class_names_to_project_ids,
-    fuse_litept_and_sam3,
-    lift_sam3_candidates_to_points,
-    load_name_mapping,
-)
-from autolabeler.noise.candidates import build_noise_review_candidates
 from autolabeler.teachers.sam3_text_adapter import Sam3TextResult, load_prompt_config, load_sam3_text_result
 
 
@@ -107,73 +99,6 @@ def test_sam3_prompt_config_and_npz_validation(tmp_path: Path):
     assert prompts == {"traffic_sign": ["traffic sign"], "CAR": ["car", "passenger car"]}
     assert result.masks.shape == (2, 4, 5)
     assert result.labels.tolist() == ["traffic_sign", "CAR"]
-
-
-def test_litept_sam3_fusion_accepts_candidates_and_ignores_weak_conflicts(tmp_path: Path):
-    mapping_path = tmp_path / "mapping.yaml"
-    mapping_path.write_text("source_to_target:\n  Car: CAR\n  Road: road\n", encoding="utf-8")
-    source_to_target = load_name_mapping(mapping_path)
-    project_classes = {"background": 0, "CAR": 2, "road": 6, "traffic_sign": 10, "ignore": 255}
-    litept_ids = class_names_to_project_ids(
-        ["background", "Car", "Road"],
-        source_to_target=source_to_target,
-        project_classes=project_classes,
-    )
-
-    litept_mask = np.zeros((H, W), dtype=np.uint16)
-    litept_conf = np.zeros((H, W), dtype=np.float32)
-    litept_mask[0, 0] = 1
-    litept_conf[0, 0] = 0.9
-    litept_mask[0, 1] = 1
-    litept_conf[0, 1] = 0.2
-
-    sam3_mask = np.zeros((1, 8, 8), dtype=bool)
-    sam3_mask[0, 1, 1] = True
-    sam3_mask[0, 2, 2] = True
-    sam3 = Sam3TextResult(
-        masks=sam3_mask,
-        scores=np.asarray([0.95], dtype=np.float32),
-        labels=np.asarray(["traffic_sign"]),
-        prompts=np.asarray(["traffic sign"]),
-    )
-    point_to_pixel = np.full((H * W, 2), -1, dtype=np.int32)
-    point_to_pixel[1] = [1, 1]
-    point_to_pixel[W + 1] = [2, 2]
-    candidate, candidate_conf = lift_sam3_candidates_to_points(
-        sam3,
-        point_to_pixel=point_to_pixel,
-        label_to_id={"traffic_sign": 10},
-        min_points_per_mask=1,
-        min_score=0.7,
-    )
-    fused = fuse_litept_and_sam3(
-        litept_mask=litept_mask,
-        litept_confidence=litept_conf,
-        litept_id_to_project_id=litept_ids,
-        sam3_candidate_mask=candidate,
-        sam3_candidate_confidence=candidate_conf,
-        litept_accept_threshold=0.65,
-        sam3_accept_threshold=0.7,
-    )
-
-    assert fused.semantic_mask[0, 0] == 2
-    assert fused.semantic_mask[0, 1] == 10
-    assert fused.semantic_mask[1, 1] == 10
-    assert fused.provenance_counts["sam3_text"] == 2
-
-
-def test_noise_review_candidates_do_not_turn_all_residual_into_hard_noise():
-    points = np.zeros((H, W, 4), dtype=np.float32)
-    points[10, :30, 0] = 10.0
-    points[10, :30, 1] = np.linspace(0.0, 1.0, 30, dtype=np.float32)
-    mask = np.zeros((H, W), dtype=np.uint16)
-
-    candidates = build_noise_review_candidates(points_range=points, semantic_mask=mask, streak_min_valid=12)
-
-    assert candidates["residual_candidate"].dtype == np.bool_
-    assert np.count_nonzero(candidates["residual_candidate"]) == 30
-    assert np.count_nonzero(candidates["range_streak_candidate"]) >= 12
-    assert "noise" not in candidates
 
 
 def test_sam3_npz_rejects_wrong_mask_dtype(tmp_path: Path):

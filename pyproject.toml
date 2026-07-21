@@ -1,7 +1,7 @@
 [project]
 name = "noise-segmentation-autolabeler"
 version = "0.1.0"
-description = "Offline LiDAR auto-labeling factory"
+description = "HL320 point-wise LiDAR and camera teacher segmentation toolkit"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.25"]
 

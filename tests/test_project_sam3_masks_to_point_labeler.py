@@ -55,7 +55,7 @@ def test_project_sam3_masks_to_point_labeler_preserves_csv_row_order(tmp_path: P
         ],
         dtype=np.uint8,
     )
-    Image.fromarray(image).save(image_dir / "000001.jpg")
+    Image.fromarray(image).save(image_dir / "000001.png")
 
     run_script(
         "--csv-dir",
@@ -86,7 +86,7 @@ def test_project_sam3_masks_to_point_labeler_preserves_csv_row_order(tmp_path: P
         [0, 0, 0],
         [0, 0, 0],
     ]
-    assert (out_dir / "image_2" / "000001.jpg").is_file()
+    assert (out_dir / "image_2" / "000001.png").is_file()
     settings = (out_dir / "settings.cfg").read_text(encoding="utf-8")
     assert "allow velodyne only: true" in settings
     assert "point cloud source: velodyne" in settings
