@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -111,6 +112,7 @@ def main() -> None:
             continue
 
         print(f"[{index:04d}/{len(image_paths):04d}] {image_path}", file=sys.stderr, flush=True)
+        frame_started_at = time.perf_counter()
         result = process_image(
             predictor=predictor,
             image_path=image_path,
@@ -123,6 +125,7 @@ def main() -> None:
             projection_stem_suffixes=tuple(args.projection_stem_suffix),
             require_projection=args.require_projection,
         )
+        processing_time_seconds = time.perf_counter() - frame_started_at
         metadata = {
             "version": 1,
             "image_path": str(result.image_path),
@@ -140,6 +143,7 @@ def main() -> None:
             "projection_copy": result.projection_copy_path,
             "mask_projection": result.mask_projection_path,
             "projection_error": result.projection_error,
+            "processing_time_seconds": round(processing_time_seconds, 6),
         }
         (frame_out / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         if args.validate:
@@ -152,6 +156,7 @@ def main() -> None:
                 "output_dir": str(frame_out),
                 "metadata": str(frame_out / "metadata.json"),
                 "instances": result.instances,
+                "processing_time_seconds": round(processing_time_seconds, 6),
             }
         )
 
