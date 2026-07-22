@@ -266,6 +266,7 @@ def write_run_manifest(
         "synced_frames": len(frames),
         "max_frames": args.max_frames,
         "frame_batch_size": args.frame_batch_size,
+        "sam3_sdpa_backend": args.sam3_sdpa_backend,
         "sam3_runs": sam3_runs,
         "max_video_frame_index": max((run["max_video_frame_index"] for run in sam3_runs), default=None),
         "processed_frames": len(exported),
@@ -330,7 +331,12 @@ def run_sam3_batches(
 
 
 def build_sam3_wrapper_args(args: argparse.Namespace, *, max_video_frame_index: int) -> list[str]:
-    sam3_extra_args = ["--max-video-frame-index", str(max_video_frame_index)]
+    sam3_extra_args = [
+        "--max-video-frame-index",
+        str(max_video_frame_index),
+        "--sdpa-backend",
+        args.sam3_sdpa_backend,
+    ]
     if args.sam3_root is not None:
         sam3_extra_args.extend(["--sam3-root", args.sam3_root])
     if args.sam3_model_path is not None:
@@ -377,6 +383,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sam3-conda-prefix", default=None)
     p.add_argument("--sam3-root", default=None, help="Optional path to the SAM3 repository, passed to the wrapper.")
     p.add_argument("--sam3-model-path", default=None, help="Optional local facebook/sam3.1 model directory, passed to the wrapper.")
+    p.add_argument(
+        "--sam3-sdpa-backend",
+        choices=("auto", "default", "math", "flash", "mem-efficient"),
+        default="auto",
+        help="Forwarded to sam3_31_video_wrapper.py. auto uses math SDPA on pre-Ampere GPUs such as sm75.",
+    )
     p.add_argument("--sam3-wrapper-arg", action="append", default=[], help="Extra argument passed to the SAM3 video wrapper.")
     p.add_argument("--max-frames", type=int, default=None, help="Process only the first N synced frames from camera_frame_manifest.json.")
     p.add_argument(

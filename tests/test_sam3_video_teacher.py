@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -127,6 +128,42 @@ def test_sam3_31_wrapper_extracts_real_output_keys():
     np.testing.assert_allclose(boxes, np.asarray([[0.1, 0.2, 0.3, 0.4]], dtype=np.float32))
 
 
+def test_sam3_31_wrapper_selects_math_sdpa_for_pre_ampere_auto():
+    script = load_sam3_31_video_wrapper_script()
+
+    assert script.select_sdpa_backend("auto", (7, 5)) == "math"
+    assert script.select_sdpa_backend("auto", (8, 0)) == "default"
+    assert script.select_sdpa_backend("math", (8, 0)) == "math"
+
+
+def test_sam3_31_wrapper_patches_decoder_sdpa_kernel_to_math():
+    script = load_sam3_31_video_wrapper_script()
+    calls = []
+
+    class Backend:
+        MATH = "math"
+        FLASH_ATTENTION = "flash"
+
+    class FakeContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_sdpa_kernel(backend):
+        calls.append(backend)
+        return FakeContext()
+
+    fake_decoder = SimpleNamespace(sdpa_kernel=fake_sdpa_kernel, SDPBackend=Backend)
+
+    assert script.patch_decoder_sdpa_kernel(fake_decoder)
+    with fake_decoder.sdpa_kernel(Backend.FLASH_ATTENTION):
+        pass
+
+    assert calls == ["math"]
+
+
 def test_run_sam3_video_teacher_smoke_without_real_conda(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     script = load_run_sam3_video_teacher_script()
     manifest = tmp_path / "camera_frame_manifest.json"
@@ -171,6 +208,7 @@ def test_run_sam3_video_teacher_smoke_without_real_conda(tmp_path: Path, monkeyp
 
     def fake_run_sam3_video_teacher(**kwargs):
         assert kwargs["extra_args"][:2] == ["--max-video-frame-index", "5"]
+        assert kwargs["extra_args"][2:4] == ["--sdpa-backend", "auto"]
         frames_payload = json.loads(Path(kwargs["frames_json"]).read_text(encoding="utf-8"))
         raw_out = Path(kwargs["output_dir"])
         for frame in frames_payload["frames"]:
@@ -311,6 +349,11 @@ def test_run_sam3_video_teacher_batches_frames(tmp_path: Path, monkeypatch: pyte
         ["--max-video-frame-index", "11"],
         ["--max-video-frame-index", "13"],
         ["--max-video-frame-index", "14"],
+    ]
+    assert [call["extra_args"][2:4] for call in calls] == [
+        ["--sdpa-backend", "auto"],
+        ["--sdpa-backend", "auto"],
+        ["--sdpa-backend", "auto"],
     ]
     for idx in range(5):
         assert (out_dir / f"frame_{idx:03d}" / "semantic_mask.npy").is_file()

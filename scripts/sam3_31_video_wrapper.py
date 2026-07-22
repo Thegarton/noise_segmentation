@@ -5,6 +5,7 @@ import argparse
 import inspect
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ MASK_KEYS = ("masks", "pred_masks", "out_binary_masks", "video_res_masks", "mask
 SCORE_KEYS = ("scores", "pred_scores", "object_scores", "out_probs", "ious")
 TRACK_ID_KEYS = ("track_ids", "obj_ids", "out_obj_ids", "object_ids", "ids")
 BOX_KEYS = ("boxes_xyxy", "boxes", "pred_boxes", "out_boxes_xywh")
+VALID_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 def main() -> None:
@@ -24,7 +26,14 @@ def main() -> None:
     if args.sam3_root:
         sys.path.insert(0, str(Path(args.sam3_root).resolve()))
 
+    sdpa_summary = configure_torch_sdpa_backend(args.sdpa_backend)
+    log(f"torch SDPA backend: {json.dumps(sdpa_summary, ensure_ascii=False, sort_keys=True)}")
+
     import sam3.model_builder as sam3_model_builder  # noqa: WPS433
+
+    decoder_sdpa_patch = patch_sam3_decoder_sdpa_kernel(str(sdpa_summary["selected"]))
+    if decoder_sdpa_patch:
+        log("patched sam3.model.decoder sdpa_kernel to force MATH backend")
 
     prompts = load_prompt_config(args.prompts)
     requested_frames = load_requested_frames(args.frames_json)
@@ -34,12 +43,12 @@ def main() -> None:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    session_resource_path = str(args.video)
+    session_resource_path = str(args.frames_resource)
     session_frames = requested_frames
     limited_resource_summary: dict[str, Any] | None = None
     if not args.use_original_video_resource:
         session_resource_path, session_frames, limited_resource_summary = prepare_limited_video_resource(
-            video=args.video,
+            frames_resource=args.frames_resource,
             requested_frames=requested_frames,
             output_dir=output_dir,
         )
@@ -125,10 +134,12 @@ def main() -> None:
 
     manifest = {
         "version": 1,
-        "video": str(args.video),
+        "frames_resource": str(args.frames_resource),
         "session_resource_path": str(session_resource_path),
         "limited_resource": limited_resource_summary,
         "use_fa3": bool(args.use_fa3),
+        "sdpa_backend": sdpa_summary,
+        "decoder_sdpa_patch": bool(decoder_sdpa_patch),
         "frames": written,
     }
     (output_dir / "sam3_31_video_wrapper_manifest.json").write_text(
@@ -140,6 +151,99 @@ def main() -> None:
 
 def log(message: str) -> None:
     print(f"[sam3_31_video_wrapper] {message}", file=sys.stderr, flush=True)
+
+
+def select_sdpa_backend(requested: str, capability: tuple[int, int] | None) -> str:
+    normalized = requested.replace("_", "-")
+    if normalized != "auto":
+        return normalized
+    if capability is not None and capability[0] < 8:
+        return "math"
+    return "default"
+
+
+def configure_torch_sdpa_backend(requested: str) -> dict[str, Any]:
+    try:
+        import torch  # noqa: WPS433
+    except ImportError:
+        return {"requested": requested, "selected": "unavailable", "torch_available": False}
+
+    capability = None
+    device_name = None
+    cuda_available = bool(torch.cuda.is_available()) if hasattr(torch, "cuda") else False
+    if cuda_available:
+        try:
+            capability = tuple(int(value) for value in torch.cuda.get_device_capability())
+            device_name = torch.cuda.get_device_name()
+        except Exception as exc:  # pragma: no cover - defensive around CUDA driver state
+            device_name = f"cuda query failed: {exc}"
+
+    selected = select_sdpa_backend(requested, capability)
+    if selected == "math":
+        set_torch_sdp_flags(torch, math=True, flash=False, mem_efficient=False, cudnn=False)
+    elif selected == "flash":
+        set_torch_sdp_flags(torch, math=False, flash=True, mem_efficient=False, cudnn=False)
+    elif selected in {"mem-efficient", "mem_efficient"}:
+        set_torch_sdp_flags(torch, math=False, flash=False, mem_efficient=True, cudnn=False)
+
+    return {
+        "requested": requested,
+        "selected": selected,
+        "torch_available": True,
+        "cuda_available": cuda_available,
+        "cuda_device": device_name,
+        "cuda_capability": list(capability) if capability is not None else None,
+    }
+
+
+def set_torch_sdp_flags(
+    torch_module: Any,
+    *,
+    math: bool,
+    flash: bool,
+    mem_efficient: bool,
+    cudnn: bool,
+) -> None:
+    cuda_backend = getattr(getattr(torch_module, "backends", None), "cuda", None)
+    if cuda_backend is None:
+        return
+    setters = {
+        "enable_math_sdp": math,
+        "enable_flash_sdp": flash,
+        "enable_mem_efficient_sdp": mem_efficient,
+        "enable_cudnn_sdp": cudnn,
+    }
+    for name, enabled in setters.items():
+        setter = getattr(cuda_backend, name, None)
+        if setter is not None:
+            setter(bool(enabled))
+
+
+def patch_sam3_decoder_sdpa_kernel(selected: str) -> bool:
+    if selected != "math":
+        return False
+    try:
+        import sam3.model.decoder as decoder_module  # noqa: WPS433
+    except ImportError:
+        return False
+    return patch_decoder_sdpa_kernel(decoder_module)
+
+
+def patch_decoder_sdpa_kernel(decoder_module: Any) -> bool:
+    if bool(getattr(decoder_module, "_noise_segmentation_math_sdpa_patch", False)):
+        return True
+    original_sdpa_kernel = getattr(decoder_module, "sdpa_kernel", None)
+    backend = getattr(decoder_module, "SDPBackend", None)
+    if original_sdpa_kernel is None or backend is None or not hasattr(backend, "MATH"):
+        return False
+
+    def math_sdpa_kernel(*args: Any, **kwargs: Any):
+        del args, kwargs
+        return original_sdpa_kernel(backend.MATH)
+
+    decoder_module.sdpa_kernel = math_sdpa_kernel
+    decoder_module._noise_segmentation_math_sdpa_patch = True
+    return True
 
 
 def reset_session(predictor: Any, session_id: str) -> None:
@@ -333,7 +437,7 @@ def write_frame_npz(path: Path, instances: list[dict[str, Any]], *, empty_mask_s
 
 def prepare_limited_video_resource(
     *,
-    video: str | Path,
+    frames_resource: str | Path,
     requested_frames: list[dict[str, Any]],
     output_dir: Path,
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
@@ -342,12 +446,17 @@ def prepare_limited_video_resource(
         shutil.rmtree(resource_dir)
     resource_dir.mkdir(parents=True, exist_ok=True)
 
+    resource_path = Path(frames_resource)
     use_image_paths = all(frame.get("image_path") and Path(str(frame["image_path"])).is_file() for frame in requested_frames)
-    source = "image_path" if use_image_paths else "video"
     if use_image_paths:
+        source = "image_path"
         write_limited_frames_from_image_paths(resource_dir, requested_frames)
+    elif resource_path.is_dir():
+        source = "frames_dir"
+        write_limited_frames_from_dir(resource_dir, frames_dir=resource_path, requested_frames=requested_frames)
     else:
-        write_limited_frames_from_video(resource_dir, video=video, requested_frames=requested_frames)
+        source = "video"
+        write_limited_frames_from_video(resource_dir, video=resource_path, requested_frames=requested_frames)
 
     session_frames = []
     for local_index, frame in enumerate(requested_frames):
@@ -375,6 +484,41 @@ def write_limited_frames_from_image_paths(resource_dir: Path, requested_frames: 
 
         from PIL import Image  # noqa: WPS433
 
+        with Image.open(src) as image:
+            image.convert("RGB").save(dst, quality=95)
+
+
+def natural_sort_key(path: Path) -> list[int | str]:
+    return [int(part) if part.isdigit() else part.casefold() for part in re.split(r"(\d+)", path.name)]
+
+
+def write_limited_frames_from_dir(
+    resource_dir: Path,
+    *,
+    frames_dir: Path,
+    requested_frames: list[dict[str, Any]],
+) -> None:
+    from PIL import Image  # noqa: WPS433
+
+    image_files = sorted(
+        [path for path in frames_dir.iterdir() if path.is_file() and path.suffix.lower() in VALID_IMAGE_EXTS],
+        key=natural_sort_key,
+    )
+    if not image_files:
+        raise ValueError(f"No valid image files found in frames directory: {frames_dir}")
+
+    for local_index, frame in enumerate(requested_frames):
+        source_index = int(frame["video_frame_index"])
+        if source_index < 0 or source_index >= len(image_files):
+            raise IndexError(
+                f"Requested frame index {source_index} is out of range for {frames_dir}; "
+                f"found {len(image_files)} images"
+            )
+        src = image_files[source_index]
+        dst = resource_dir / f"{local_index:05d}.jpg"
+        if src.suffix.lower() in {".jpg", ".jpeg"}:
+            shutil.copy2(src, dst)
+            continue
         with Image.open(src) as image:
             image.convert("RGB").save(dst, quality=95)
 
@@ -425,7 +569,10 @@ def load_requested_frames(path: str | Path) -> list[dict[str, Any]]:
 def read_resource_shape(resource_path: str | Path) -> tuple[int, int]:
     path = Path(resource_path)
     if path.is_dir():
-        frames = sorted(list(path.glob("*.jpg")) + list(path.glob("*.jpeg")) + list(path.glob("*.png")))
+        frames = sorted(
+            [item for item in path.iterdir() if item.is_file() and item.suffix.lower() in VALID_IMAGE_EXTS],
+            key=natural_sort_key,
+        )
         if not frames:
             raise ValueError(f"No image frames found in video resource directory: {path}")
         from PIL import Image  # noqa: WPS433
@@ -495,7 +642,15 @@ def strip_quotes(value: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SAM3.1 video wrapper used by noise_segmentation teacher pipeline.")
-    parser.add_argument("--video", required=True, help="MP4 video path or directory with numbered JPEG frames.")
+    parser.add_argument(
+        "--video",
+        "--frames-dir",
+        "--images-dir",
+        "--img-dir",
+        dest="frames_resource",
+        required=True,
+        help="MP4 video path or directory with numbered image frames.",
+    )
     parser.add_argument("--prompts", required=True, help="YAML prompt config keyed by target class name.")
     parser.add_argument("--frames-json", required=True, help="JSON with requested frame_id/video_frame_index pairs.")
     parser.add_argument("--output-dir", required=True, help="Directory where <frame_id>.npz outputs are written.")
@@ -506,6 +661,15 @@ def parse_args() -> argparse.Namespace:
         "--use-fa3",
         action="store_true",
         help="Enable FlashAttention 3 in SAM3.1. Disabled by default for wider GPU/dtype compatibility.",
+    )
+    parser.add_argument(
+        "--sdpa-backend",
+        choices=("auto", "default", "math", "flash", "mem-efficient"),
+        default="auto",
+        help=(
+            "PyTorch scaled-dot-product attention backend. "
+            "auto selects math on pre-Ampere GPUs such as sm75 to avoid 'No available kernel'."
+        ),
     )
     parser.add_argument(
         "--use-original-video-resource",
