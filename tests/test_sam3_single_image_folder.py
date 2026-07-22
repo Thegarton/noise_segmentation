@@ -62,6 +62,23 @@ def test_build_semantic_outputs_keeps_highest_score():
     assert counts == {"TRUCK_BUS": 1, "CAR": 1}
 
 
+def test_make_overlay_can_draw_class_name_and_score():
+    script = load_script()
+    image = np.full((40, 60, 3), 220, dtype=np.uint8)
+    semantic = np.zeros((40, 60), dtype=np.uint16)
+    semantic[10:30, 15:45] = 2
+    confidence = np.zeros((40, 60), dtype=np.float32)
+    confidence[10:30, 15:45] = np.float32(0.87)
+    mask = semantic == 2
+    instance = script.Sam3Instance(label="CAR", class_id=2, prompt="car", score=0.87, mask=mask)
+
+    plain = script.make_overlay(image, semantic)
+    annotated = script.make_overlay(image, semantic, instances=[instance], confidence=confidence)
+
+    assert annotated.shape == image.shape
+    assert not np.array_equal(annotated, plain)
+
+
 def test_projection_is_matched_by_image_stem(tmp_path: Path):
     script = load_script()
     image_path = tmp_path / "images" / "000001.jpg"

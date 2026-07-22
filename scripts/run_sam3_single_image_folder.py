@@ -326,7 +326,7 @@ def save_image_outputs(
     save_instances_npz(output_dir / "instances.npz", instances, shape=semantic_mask.shape)
 
     image_np = np.asarray(image, dtype=np.uint8)
-    overlay = make_overlay(image_np, semantic_mask)
+    overlay = make_overlay(image_np, semantic_mask, instances=instances, confidence=confidence)
     semantic_color = make_semantic_color(semantic_mask)
     Image.fromarray(overlay).save(output_dir / "overlay.jpg", quality=95)
     Image.fromarray(semantic_color).save(output_dir / "semantic_color.png")
@@ -532,7 +532,15 @@ def save_instances_npz(path: Path, instances: list[Sam3Instance], *, shape: tupl
     np.savez_compressed(path, **payload)
 
 
-def make_overlay(image_np: np.ndarray, semantic_mask: np.ndarray, *, alpha: float = 0.45) -> np.ndarray:
+def make_overlay(
+    image_np: np.ndarray,
+    semantic_mask: np.ndarray,
+    *,
+    alpha: float = 0.45,
+    instances: list[Sam3Instance] | None = None,
+    confidence: np.ndarray | None = None,
+    min_label_area: int = 64,
+) -> np.ndarray:
     overlay = image_np.copy()
     for class_id in sorted(int(x) for x in np.unique(semantic_mask) if int(x) != 0):
         color = color_for_class(class_id)
@@ -540,7 +548,78 @@ def make_overlay(image_np: np.ndarray, semantic_mask: np.ndarray, *, alpha: floa
         overlay[mask] = (
             overlay[mask].astype(np.float32) * (1.0 - alpha) + color.astype(np.float32) * alpha
         ).astype(np.uint8)
+    if instances:
+        overlay = draw_instance_labels(
+            overlay,
+            semantic_mask=semantic_mask,
+            instances=instances,
+            confidence=confidence,
+            min_label_area=min_label_area,
+        )
     return overlay
+
+
+def draw_instance_labels(
+    overlay: np.ndarray,
+    *,
+    semantic_mask: np.ndarray,
+    instances: list[Sam3Instance],
+    confidence: np.ndarray | None,
+    min_label_area: int,
+) -> np.ndarray:
+    from PIL import Image, ImageDraw, ImageFont  # noqa: WPS433
+
+    image = Image.fromarray(np.asarray(overlay, dtype=np.uint8)).convert("RGB")
+    draw = ImageDraw.Draw(image, "RGBA")
+    font = ImageFont.load_default()
+    height, width = semantic_mask.shape
+
+    for item in sorted(instances, key=lambda value: value.score, reverse=True):
+        visible = item.mask & (semantic_mask == item.class_id)
+        if confidence is not None:
+            visible &= np.isclose(confidence, np.float32(item.score), atol=1e-6)
+        if int(np.count_nonzero(visible)) < min_label_area:
+            continue
+
+        text = f"{item.label} {item.score:.2f}"
+        label_x, label_y = label_anchor(visible, image_size=(width, height), text=text, draw=draw, font=font)
+        color = color_for_class(item.class_id)
+        text_bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+        padding = 4
+        box = [
+            label_x,
+            label_y,
+            label_x + text_width + padding * 2,
+            label_y + text_height + padding * 2,
+        ]
+        draw.rectangle(box, fill=(int(color[0]), int(color[1]), int(color[2]), 220), outline=(0, 0, 0, 220))
+        draw.text(
+            (label_x + padding, label_y + padding),
+            text,
+            font=font,
+            fill=contrast_text_color(color),
+        )
+    return np.asarray(image, dtype=np.uint8)
+
+
+def label_anchor(visible: np.ndarray, *, image_size: tuple[int, int], text: str, draw: Any, font: Any) -> tuple[int, int]:
+    width, height = image_size
+    ys, xs = np.nonzero(visible)
+    center_x = int(np.median(xs))
+    center_y = int(np.median(ys))
+    text_bbox = draw.textbbox((0, 0), text, font=font)
+    text_width = text_bbox[2] - text_bbox[0] + 8
+    text_height = text_bbox[3] - text_bbox[1] + 8
+    label_x = min(max(center_x - text_width // 2, 0), max(width - text_width - 1, 0))
+    label_y = min(max(center_y - text_height // 2, 0), max(height - text_height - 1, 0))
+    return int(label_x), int(label_y)
+
+
+def contrast_text_color(color: np.ndarray) -> tuple[int, int, int, int]:
+    luminance = 0.2126 * float(color[0]) + 0.7152 * float(color[1]) + 0.0722 * float(color[2])
+    return (0, 0, 0, 255) if luminance > 145.0 else (255, 255, 255, 255)
 
 
 def make_semantic_color(semantic_mask: np.ndarray) -> np.ndarray:
