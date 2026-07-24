@@ -35,6 +35,7 @@ def build_hl320_dataset(
     seed: int = 42,
     overwrite: bool = False,
     ignore_id: int = IGNORE_ID,
+    prepare_output: bool = True,
 ) -> HL320DatasetBuildResult:
     csv_root = Path(csv_dir).expanduser().resolve()
     labels_root = Path(labels_dir).expanduser().resolve()
@@ -53,7 +54,10 @@ def build_hl320_dataset(
     }
     if not 0.0 <= val_ratio < 1.0:
         raise ValueError(f"val_ratio must be in [0, 1), got {val_ratio}")
-    _prepare_output_dir(out_root, overwrite=overwrite)
+    if prepare_output:
+        _prepare_output_dir(out_root, overwrite=overwrite)
+    else:
+        out_root.mkdir(parents=True, exist_ok=True)
 
     csv_paths = sorted(csv_root.glob("*.csv"))
     if len(csv_paths) < 2 and val_ratio > 0.0:
