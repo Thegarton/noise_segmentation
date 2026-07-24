@@ -84,10 +84,10 @@ def make_dataset(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     frame_specs = {
-        "000000": [2, 2, 18],
-        "000001": [5, 5, 18],
-        "000002": [2, 5, 18],
-        "000003": [2, 5, 18],
+        "000000": [2, 18],
+        "000001": [5, 18],
+        "000002": [2, 5],
+        "000003": [2, 5],
     }
     for frame_id, labels in frame_specs.items():
         (csv_dir / f"{frame_id}.csv").write_text(

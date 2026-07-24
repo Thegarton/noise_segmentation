@@ -14,7 +14,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from autolabeler.hl320.csv_points import build_hl320_features, load_hl320_csv  # noqa: E402
+from autolabeler.hl320.csv_points import build_hl320_features, load_hl320_csv, primary_returns_frame  # noqa: E402
 from autolabeler.teachers.litept_adapter import (  # noqa: E402
     LitePTUnavailableError,
     _add_litept_to_path,
@@ -238,11 +238,12 @@ def load_flat_csv(path: Path) -> dict[str, Any]:
 
 def load_inference_frame(path: Path, *, feature_mode: str) -> dict[str, Any]:
     if feature_mode == "hl320":
-        frame = load_hl320_csv(path)
+        echo_frame = load_hl320_csv(path)
+        frame = primary_returns_frame(echo_frame)
         return {
             "frame_id": frame.frame_id,
             "points": frame.points,
-            "strength": build_hl320_features(frame),
+            "strength": build_hl320_features(frame, echo_frame=echo_frame),
             "columns": frame.columns,
             "optional": frame.fields,
         }

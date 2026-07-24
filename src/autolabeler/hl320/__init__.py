@@ -7,6 +7,7 @@ from .csv_points import (
     build_hl320_features,
     group_echo_returns,
     load_hl320_csv,
+    primary_returns_frame,
     project_echo_context_to_frame,
 )
 from .dataset import build_hl320_dataset
@@ -37,5 +38,6 @@ __all__ = [
     "lift_sam3_to_points",
     "load_hl320_csv",
     "load_hl320_raw_float_records",
+    "primary_returns_frame",
     "project_echo_context_to_frame",
 ]

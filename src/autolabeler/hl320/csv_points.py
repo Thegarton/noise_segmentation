@@ -87,6 +87,23 @@ def load_hl320_csv(path: str | Path) -> HL320Frame:
     return HL320Frame(frame_id=source.stem, path=source, points=points, columns=columns, fields=fields)
 
 
+def primary_returns_frame(frame: HL320Frame) -> HL320Frame:
+    block_id = frame.fields.get("block_id")
+    if block_id is None:
+        return frame
+    primary = np.isfinite(block_id) & (block_id.astype(np.int64) == 0)
+    if not np.any(primary):
+        raise ValueError(f"HL320 CSV {frame.path} has blockID column but no blockID == 0 rows")
+    fields = {name: values[primary].copy() for name, values in frame.fields.items()}
+    return HL320Frame(
+        frame_id=frame.frame_id,
+        path=frame.path,
+        points=frame.points[primary].copy(),
+        columns=frame.columns,
+        fields=fields,
+    )
+
+
 def build_hl320_features(frame: HL320Frame, *, echo_frame: HL320Frame | None = None) -> np.ndarray:
     groups = group_echo_returns(frame)
     if echo_frame is not None:

@@ -48,7 +48,6 @@ class HL320BinDirectoryConversion:
     output_dir: Path
     calibration_map: Path
     name_mode: str
-    echo_mode: str
     frames: list[HL320BinFrameConversion]
     manifest_path: Path
 
@@ -59,7 +58,6 @@ def convert_hl320_bin_dir_to_csv(
     output_dir: str | Path,
     calibration_map: str | Path | None = None,
     name_mode: str = "sequential",
-    echo_mode: str = "all",
     overwrite: bool = False,
 ) -> HL320BinDirectoryConversion:
     bin_root = Path(bin_dir).expanduser().resolve()
@@ -68,8 +66,6 @@ def convert_hl320_bin_dir_to_csv(
         raise FileNotFoundError(f"HL320 bin directory does not exist: {bin_root}")
     if name_mode not in {"sequential", "stem"}:
         raise ValueError(f"name_mode must be 'sequential' or 'stem', got {name_mode!r}")
-    if echo_mode not in {"primary", "all"}:
-        raise ValueError(f"echo_mode must be 'primary' or 'all', got {echo_mode!r}")
     bin_paths = sorted(bin_root.glob("*.bin"))
     if not bin_paths:
         raise FileNotFoundError(f"No .bin files found in {bin_root}")
@@ -88,7 +84,6 @@ def convert_hl320_bin_dir_to_csv(
                 output_csv=output_csv,
                 calibration=calibration,
                 frame_id=frame_id,
-                echo_mode=echo_mode,
             )
         )
 
@@ -99,7 +94,8 @@ def convert_hl320_bin_dir_to_csv(
         "output_dir": str(csv_root),
         "calibration_map": str(calibration_path),
         "name_mode": name_mode,
-        "echo_mode": echo_mode,
+        "echo_layout": "all_returns",
+        "primary_return": "blockID == 0",
         "columns": HL320_BIN_CSV_COLUMNS,
         "frames": [
             {
@@ -120,7 +116,6 @@ def convert_hl320_bin_dir_to_csv(
         output_dir=csv_root,
         calibration_map=calibration_path,
         name_mode=name_mode,
-        echo_mode=echo_mode,
         frames=frames,
         manifest_path=manifest_path,
     )
@@ -132,7 +127,6 @@ def convert_hl320_bin_to_csv(
     output_csv: str | Path,
     calibration: dict[str, Any],
     frame_id: str | None = None,
-    echo_mode: str = "all",
 ) -> HL320BinFrameConversion:
     source = Path(bin_path).expanduser().resolve()
     destination = Path(output_csv).expanduser().resolve()
@@ -147,10 +141,7 @@ def convert_hl320_bin_to_csv(
     if width <= 0 or height <= 0:
         raise ValueError(f"HL320 bin file {source} has invalid width/height: {width}x{height}")
 
-    if echo_mode not in {"primary", "all"}:
-        raise ValueError(f"echo_mode must be 'primary' or 'all', got {echo_mode!r}")
-
-    rows = list(decode_hl320_bin_rows(data, width=width, height=height, calibration=calibration, echo_mode=echo_mode))
+    rows = list(decode_hl320_bin_rows(data, width=width, height=height, calibration=calibration))
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=HL320_BIN_CSV_COLUMNS)
@@ -173,14 +164,12 @@ def decode_hl320_bin_rows(
     width: int,
     height: int,
     calibration: dict[str, Any],
-    echo_mode: str = "all",
 ) -> list[dict[str, float | int]]:
     rows: list[dict[str, float | int]] = []
-    echo_indices = range(1) if echo_mode == "primary" else range(ECHO_COUNT)
     for slot_index in range(width):
         for pixel_index in range(height):
             ray_offset = GZIP_HEADER_LEN + pixel_index * BATCH_POINT_LEN * ECHO_COUNT + slot_index * SLOT_DATA_SIZE
-            for echo_index in echo_indices:
+            for echo_index in range(ECHO_COUNT):
                 offset = ray_offset + echo_index * BATCH_POINT_LEN
                 if offset + BATCH_POINT_LEN > len(data):
                     break

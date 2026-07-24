@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from autolabeler.data.class_config import load_noise_groups, load_semantic_classes
-from autolabeler.hl320.csv_points import load_hl320_csv
+from autolabeler.hl320.csv_points import load_hl320_csv, primary_returns_frame
 
 
 IGNORE_ID = 255
@@ -99,7 +99,7 @@ def fuse_hl320_predictions(
     }
 
     for csv_path in csv_paths:
-        frame = load_hl320_csv(csv_path)
+        frame = primary_returns_frame(load_hl320_csv(csv_path))
         litept = load_point_prediction(litept_root / frame.frame_id, expected_points=frame.point_count)
         sam3 = lift_sam3_to_points(
             sam3_frame_dir=sam3_root / frame.frame_id,

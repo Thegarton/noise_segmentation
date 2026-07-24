@@ -43,9 +43,9 @@ def test_hl320_feature_mode_builds_multichannel_strength(tmp_path: Path):
 
     frame = script.load_inference_frame(csv_path, feature_mode="hl320")
 
-    assert frame["points"].shape == (2, 4)
+    assert frame["points"].shape == (1, 4)
     assert frame["strength"].ndim == 2
-    assert frame["strength"].shape[0] == 2
+    assert frame["strength"].shape[0] == 1
     assert frame["strength"].shape[1] > 1
 
 

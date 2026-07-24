@@ -278,7 +278,8 @@ def load_csv_columns(path: Path) -> dict[str, np.ndarray]:
             "cxd": require_column(column_map, "cxd", path),
             "cyd": require_column(column_map, "cyd", path),
         }
-        max_column = max(required.values())
+        block_column = column_map.get("blockid", column_map.get("block_id"))
+        max_column = max([*required.values(), block_column if block_column is not None else 0])
         values = {name: [] for name in required}
         for line_number, raw_line in enumerate(handle, start=2):
             stripped = raw_line.strip()
@@ -287,6 +288,8 @@ def load_csv_columns(path: Path) -> dict[str, np.ndarray]:
             tokens = split_table_row(stripped)
             if len(tokens) <= max_column:
                 raise ValueError(f"{path}:{line_number}: expected at least {max_column + 1} columns, got {len(tokens)}")
+            if block_column is not None and int(parse_float(tokens[block_column], path, line_number, "blockID")) != 0:
+                continue
             for name, column in required.items():
                 values[name].append(parse_float(tokens[column], path, line_number, name))
     return {name: np.asarray(items, dtype=np.float64) for name, items in values.items()}

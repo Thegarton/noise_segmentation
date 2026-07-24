@@ -19,7 +19,7 @@ from autolabeler.hl320.bin_to_csv import (
     convert_hl320_bin_to_csv,
     resolve_calibration_map,
 )
-from autolabeler.hl320.csv_points import HL320_FEATURE_NAMES, load_hl320_csv
+from autolabeler.hl320.csv_points import HL320_FEATURE_NAMES, load_hl320_csv, primary_returns_frame
 
 
 def test_convert_hl320_bin_to_csv_preserves_row_order_and_columns(tmp_path: Path):
@@ -32,7 +32,6 @@ def test_convert_hl320_bin_to_csv_preserves_row_order_and_columns(tmp_path: Path
         output_csv=tmp_path / "000000.csv",
         calibration=json.loads(calibration_path.read_text(encoding="utf-8")),
         frame_id="000000",
-        echo_mode="all",
     )
 
     assert result.rows == 12
@@ -50,9 +49,12 @@ def test_convert_hl320_bin_to_csv_preserves_row_order_and_columns(tmp_path: Path
     frame = load_hl320_csv(result.output_csv)
     assert frame.point_count == 12
     np.testing.assert_allclose(frame.points[:6, 0], np.asarray([1.0, 1.25, 1.5, 2.0, 2.25, 2.5], dtype=np.float32))
+    primary = primary_returns_frame(frame)
+    assert primary.point_count == 4
+    np.testing.assert_allclose(primary.points[:, 0], np.asarray([1.0, 2.0, 11.0, 12.0], dtype=np.float32))
 
 
-def test_convert_hl320_bin_to_csv_primary_mode_keeps_projection_rows(tmp_path: Path):
+def test_primary_returns_frame_filters_block_id_zero_without_writing_extra_csv(tmp_path: Path):
     calibration_path = write_calibration(tmp_path / "calibration_map.txt")
     bin_path = tmp_path / "frame.bin"
     write_synthetic_bin(bin_path, width=2, height=2)
@@ -62,13 +64,13 @@ def test_convert_hl320_bin_to_csv_primary_mode_keeps_projection_rows(tmp_path: P
         output_csv=tmp_path / "000000.csv",
         calibration=json.loads(calibration_path.read_text(encoding="utf-8")),
         frame_id="000000",
-        echo_mode="primary",
     )
 
-    rows = read_csv_rows(result.output_csv)
-    assert result.rows == 4
-    assert [float(row["x"]) for row in rows] == [1.0, 2.0, 11.0, 12.0]
-    assert [int(row["blockID"]) for row in rows] == [0, 0, 0, 0]
+    primary = primary_returns_frame(load_hl320_csv(result.output_csv))
+    assert result.rows == 12
+    assert primary.point_count == 4
+    np.testing.assert_allclose(primary.points[:, 0], np.asarray([1.0, 2.0, 11.0, 12.0], dtype=np.float32))
+    np.testing.assert_allclose(primary.fields["block_id"], np.zeros((4,), dtype=np.float32))
 
 
 def test_convert_hl320_bin_dir_supports_sequential_stem_and_calibration_discovery(tmp_path: Path):
@@ -85,7 +87,6 @@ def test_convert_hl320_bin_dir_supports_sequential_stem_and_calibration_discover
         bin_dir=bin_dir,
         output_dir=tmp_path / "csv_seq",
         name_mode="sequential",
-        echo_mode="primary",
         overwrite=True,
     )
     assert [frame.output_csv.name for frame in sequential.frames] == ["000000.csv", "000001.csv"]
@@ -96,7 +97,6 @@ def test_convert_hl320_bin_dir_supports_sequential_stem_and_calibration_discover
         output_dir=tmp_path / "csv_stem",
         calibration_map=calibration_path,
         name_mode="stem",
-        echo_mode="primary",
         overwrite=True,
     )
     assert [frame.output_csv.name for frame in stem.frames] == ["a_frame.csv", "b_frame.csv"]
@@ -150,14 +150,10 @@ def test_build_hl320_dataset_cli_accepts_bin_dir(tmp_path: Path):
     payload = json.loads(result.stdout)
     out_dir = Path(payload["output_dir"])
     assert Path(payload["conversion_manifest"]).is_file()
-    assert Path(payload["conversion_primary_manifest"]).is_file()
-    assert Path(payload["conversion_all_echo_manifest"]).is_file()
-    assert payload["csv_dir"].endswith("converted_csv/primary")
-    assert payload["echo_csv_dir"].endswith("converted_csv/all_echo")
-    assert (out_dir / "converted_csv" / "primary" / "000000.csv").is_file()
-    assert (out_dir / "converted_csv" / "primary" / "000001.csv").is_file()
-    assert len(read_csv_rows(out_dir / "converted_csv" / "primary" / "000000.csv")) == 4
-    assert len(read_csv_rows(out_dir / "converted_csv" / "all_echo" / "000000.csv")) == 12
+    assert payload["csv_dir"].endswith("converted_csv")
+    assert (out_dir / "converted_csv" / "000000.csv").is_file()
+    assert (out_dir / "converted_csv" / "000001.csv").is_file()
+    assert len(read_csv_rows(out_dir / "converted_csv" / "000000.csv")) == 12
     assert (out_dir / "hl320_dataset_manifest.json").is_file()
     dataset_frame_dirs = {path.name: path for path in (out_dir / "dataset").glob("*/*")}
     assert len(dataset_frame_dirs) == 2

@@ -67,14 +67,14 @@ def test_build_hl320_dataset_writes_coord_features_segment_and_manifest(tmp_path
     for frame_id, class_id in (("000000", 2), ("000001", 5), ("000002", 5)):
         (csv_dir / f"{frame_id}.csv").write_text(
             "x y z intensity slot pixel blockID Cxd Cyd\n"
-            "0 0 0 0 2 0 0 10 20\n"
+            "0.1 0 0 0 2 0 0 10 20\n"
             f"1 2 3 4 2 1 0 11 21\n"
             f"2 3 4 8 2 1 1 11 21\n",
             encoding="utf-8",
         )
         frame_label_dir = labels_dir / frame_id
         frame_label_dir.mkdir()
-        np.save(frame_label_dir / "semantic_mask.npy", np.asarray([255, class_id, class_id], dtype=np.uint16))
+        np.save(frame_label_dir / "semantic_mask.npy", np.asarray([class_id, class_id], dtype=np.uint16))
 
     result = build_hl320_dataset(
         csv_dir=csv_dir,

@@ -216,7 +216,8 @@ def load_csv_point_frame(path: Path) -> CsvPointFrame:
         columns = split_table_row(header_line)
         column_map = {name.strip().casefold(): index for index, name in enumerate(columns)}
         required = {name: require_column(column_map, name, path) for name in ("x", "y", "z", "intensity", "cxd", "cyd")}
-        max_column = max(required.values())
+        block_column = column_map.get("blockid", column_map.get("block_id"))
+        max_column = max([*required.values(), block_column if block_column is not None else 0])
 
         points: list[list[float]] = []
         cxd: list[float] = []
@@ -228,6 +229,8 @@ def load_csv_point_frame(path: Path) -> CsvPointFrame:
             tokens = split_table_row(stripped)
             if len(tokens) <= max_column:
                 raise ValueError(f"{path}:{line_number}: expected at least {max_column + 1} columns, got {len(tokens)}")
+            if block_column is not None and int(parse_float(tokens[block_column], path, line_number, "blockID")) != 0:
+                continue
             x = parse_float(tokens[required["x"]], path, line_number, "x")
             y = parse_float(tokens[required["y"]], path, line_number, "y")
             z = parse_float(tokens[required["z"]], path, line_number, "z")
