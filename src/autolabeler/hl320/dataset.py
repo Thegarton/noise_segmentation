@@ -30,6 +30,7 @@ def build_hl320_dataset(
     csv_dir: str | Path,
     labels_dir: str | Path,
     output_dir: str | Path,
+    echo_csv_dir: str | Path | None = None,
     classes_yaml: str | Path = "configs/classes.yaml",
     val_ratio: float = 0.2,
     seed: int = 42,
@@ -40,11 +41,14 @@ def build_hl320_dataset(
     csv_root = Path(csv_dir).expanduser().resolve()
     labels_root = Path(labels_dir).expanduser().resolve()
     out_root = Path(output_dir).expanduser().resolve()
+    echo_root = Path(echo_csv_dir).expanduser().resolve() if echo_csv_dir is not None else None
     classes_path = Path(classes_yaml).expanduser().resolve()
     if not csv_root.is_dir():
         raise FileNotFoundError(f"CSV directory does not exist: {csv_root}")
     if not labels_root.exists():
         raise FileNotFoundError(f"Labels directory does not exist: {labels_root}")
+    if echo_root is not None and not echo_root.is_dir():
+        raise FileNotFoundError(f"Echo CSV directory does not exist: {echo_root}")
     class_to_source_id = load_semantic_classes(str(classes_path))
     known_source_ids = {int(value) for value in class_to_source_id.values()}
     ignore_source_ids = {
@@ -68,10 +72,12 @@ def build_hl320_dataset(
     frame_infos = []
     for csv_path in csv_paths:
         frame = load_hl320_csv(csv_path)
+        echo_path = resolve_echo_csv_path(echo_root, frame.frame_id) if echo_root is not None else None
+        echo_frame = load_hl320_csv(echo_path) if echo_path is not None else None
         labels_path = resolve_label_path(labels_root, frame.frame_id)
         labels = load_flat_labels(labels_path, expected_points=frame.point_count)
         valid = valid_xyz_mask(frame.points)
-        features = build_hl320_features(frame)
+        features = build_hl320_features(frame, echo_frame=echo_frame)
         source_counts = _class_counts(labels[valid], ignore_ids=ignore_source_ids)
         unknown_source_ids = sorted(
             int(value)
@@ -82,6 +88,7 @@ def build_hl320_dataset(
             {
                 "frame_id": frame.frame_id,
                 "csv_path": csv_path,
+                "echo_csv_path": echo_path,
                 "labels_path": labels_path,
                 "points": frame.points,
                 "features": features,
@@ -121,6 +128,7 @@ def build_hl320_dataset(
         "version": 1,
         "format": "hl320_pointwise_v1",
         "csv_dir": str(csv_root),
+        "echo_csv_dir": str(echo_root) if echo_root is not None else None,
         "labels_dir": str(labels_root),
         "output_dir": str(out_root),
         "classes_yaml": str(classes_path),
@@ -160,6 +168,7 @@ def build_hl320_dataset(
             "frame_id": frame_id,
             "split": split,
             "source_csv": str(info["csv_path"]),
+            "source_echo_csv": str(info["echo_csv_path"]) if info["echo_csv_path"] is not None else None,
             "source_labels": str(info["labels_path"]),
             "raw_points": int(np.asarray(info["points"]).shape[0]),
             "valid_points": int(coord.shape[0]),
@@ -199,6 +208,15 @@ def resolve_label_path(labels_root: Path, frame_id: str) -> Path:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(f"No flat label mask found for frame {frame_id!r} under {labels_root}")
+
+
+def resolve_echo_csv_path(echo_root: Path | None, frame_id: str) -> Path | None:
+    if echo_root is None:
+        return None
+    candidate = echo_root / f"{frame_id}.csv"
+    if candidate.is_file():
+        return candidate
+    raise FileNotFoundError(f"No all-echo CSV found for frame {frame_id!r} under {echo_root}")
 
 
 def load_flat_labels(path: Path, *, expected_points: int) -> np.ndarray:

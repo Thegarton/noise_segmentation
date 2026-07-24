@@ -19,7 +19,7 @@ from autolabeler.hl320.bin_to_csv import (
     convert_hl320_bin_to_csv,
     resolve_calibration_map,
 )
-from autolabeler.hl320.csv_points import load_hl320_csv
+from autolabeler.hl320.csv_points import HL320_FEATURE_NAMES, load_hl320_csv
 
 
 def test_convert_hl320_bin_to_csv_preserves_row_order_and_columns(tmp_path: Path):
@@ -32,22 +32,43 @@ def test_convert_hl320_bin_to_csv_preserves_row_order_and_columns(tmp_path: Path
         output_csv=tmp_path / "000000.csv",
         calibration=json.loads(calibration_path.read_text(encoding="utf-8")),
         frame_id="000000",
+        echo_mode="all",
     )
 
-    assert result.rows == 4
+    assert result.rows == 12
     rows = read_csv_rows(result.output_csv)
-    assert list(rows[0]) == ["x", "y", "z", "azimuth", "vertical", "intensity", "slot", "pixel", "hcell", "vcell", "Cxd", "Cyd"]
-    assert [float(row["x"]) for row in rows] == [1.0, 2.0, 11.0, 12.0]
-    assert [int(row["slot"]) for row in rows] == [2, 2, 3, 3]
-    assert [int(row["pixel"]) for row in rows] == [0, 1, 0, 1]
+    assert list(rows[0]) == ["x", "y", "z", "azimuth", "vertical", "intensity", "slot", "pixel", "blockID", "hcell", "vcell", "Cxd", "Cyd"]
+    assert [float(row["x"]) for row in rows[:6]] == [1.0, 1.25, 1.5, 2.0, 2.25, 2.5]
+    assert [int(row["slot"]) for row in rows[:6]] == [2, 2, 2, 2, 2, 2]
+    assert [int(row["pixel"]) for row in rows[:6]] == [0, 0, 0, 1, 1, 1]
+    assert [int(row["blockID"]) for row in rows[:6]] == [0, 1, 2, 0, 1, 2]
     assert int(rows[0]["hcell"]) == 49
     assert int(rows[0]["vcell"]) == 1
     assert float(rows[0]["Cxd"]) == 123.0
     assert float(rows[0]["Cyd"]) == 456.0
 
     frame = load_hl320_csv(result.output_csv)
-    assert frame.point_count == 4
-    np.testing.assert_allclose(frame.points[:, 0], np.asarray([1.0, 2.0, 11.0, 12.0], dtype=np.float32))
+    assert frame.point_count == 12
+    np.testing.assert_allclose(frame.points[:6, 0], np.asarray([1.0, 1.25, 1.5, 2.0, 2.25, 2.5], dtype=np.float32))
+
+
+def test_convert_hl320_bin_to_csv_primary_mode_keeps_projection_rows(tmp_path: Path):
+    calibration_path = write_calibration(tmp_path / "calibration_map.txt")
+    bin_path = tmp_path / "frame.bin"
+    write_synthetic_bin(bin_path, width=2, height=2)
+
+    result = convert_hl320_bin_to_csv(
+        bin_path=bin_path,
+        output_csv=tmp_path / "000000.csv",
+        calibration=json.loads(calibration_path.read_text(encoding="utf-8")),
+        frame_id="000000",
+        echo_mode="primary",
+    )
+
+    rows = read_csv_rows(result.output_csv)
+    assert result.rows == 4
+    assert [float(row["x"]) for row in rows] == [1.0, 2.0, 11.0, 12.0]
+    assert [int(row["blockID"]) for row in rows] == [0, 0, 0, 0]
 
 
 def test_convert_hl320_bin_dir_supports_sequential_stem_and_calibration_discovery(tmp_path: Path):
@@ -64,6 +85,7 @@ def test_convert_hl320_bin_dir_supports_sequential_stem_and_calibration_discover
         bin_dir=bin_dir,
         output_dir=tmp_path / "csv_seq",
         name_mode="sequential",
+        echo_mode="primary",
         overwrite=True,
     )
     assert [frame.output_csv.name for frame in sequential.frames] == ["000000.csv", "000001.csv"]
@@ -74,6 +96,7 @@ def test_convert_hl320_bin_dir_supports_sequential_stem_and_calibration_discover
         output_dir=tmp_path / "csv_stem",
         calibration_map=calibration_path,
         name_mode="stem",
+        echo_mode="primary",
         overwrite=True,
     )
     assert [frame.output_csv.name for frame in stem.frames] == ["a_frame.csv", "b_frame.csv"]
@@ -127,10 +150,21 @@ def test_build_hl320_dataset_cli_accepts_bin_dir(tmp_path: Path):
     payload = json.loads(result.stdout)
     out_dir = Path(payload["output_dir"])
     assert Path(payload["conversion_manifest"]).is_file()
-    assert (out_dir / "converted_csv" / "000000.csv").is_file()
-    assert (out_dir / "converted_csv" / "000001.csv").is_file()
+    assert Path(payload["conversion_primary_manifest"]).is_file()
+    assert Path(payload["conversion_all_echo_manifest"]).is_file()
+    assert payload["csv_dir"].endswith("converted_csv/primary")
+    assert payload["echo_csv_dir"].endswith("converted_csv/all_echo")
+    assert (out_dir / "converted_csv" / "primary" / "000000.csv").is_file()
+    assert (out_dir / "converted_csv" / "primary" / "000001.csv").is_file()
+    assert len(read_csv_rows(out_dir / "converted_csv" / "primary" / "000000.csv")) == 4
+    assert len(read_csv_rows(out_dir / "converted_csv" / "all_echo" / "000000.csv")) == 12
     assert (out_dir / "hl320_dataset_manifest.json").is_file()
-    assert len(list((out_dir / "dataset").glob("*/*"))) == 2
+    dataset_frame_dirs = {path.name: path for path in (out_dir / "dataset").glob("*/*")}
+    assert len(dataset_frame_dirs) == 2
+    features = np.load(dataset_frame_dirs["000000"] / "features.npy")
+    assert features.shape[0] == 4
+    return_count_index = HL320_FEATURE_NAMES.index("return_count")
+    np.testing.assert_allclose(features[:, return_count_index], np.full((4,), 3.0, dtype=np.float32))
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -156,16 +190,18 @@ def write_synthetic_bin(path: Path, *, width: int, height: int, base_x: float = 
     data[8:12] = int(height).to_bytes(4, "little")
     for slot_index in range(width):
         for pixel_index in range(height):
-            offset = GZIP_HEADER_LEN + pixel_index * BATCH_POINT_LEN * ECHO_COUNT + slot_index * SLOT_DATA_SIZE
-            x = base_x + slot_index * 10.0 + pixel_index
-            y = x + 0.1
-            z = x + 0.2
-            struct.pack_into("<f", data, offset, x)
-            struct.pack_into("<f", data, offset + 4, y)
-            struct.pack_into("<f", data, offset + 8, z)
-            struct.pack_into("<f", data, offset + 16, 80.0 + slot_index)
-            struct.pack_into("<f", data, offset + 20, 30.0 + pixel_index)
-            data[offset + 24 : offset + 28] = int(2 + pixel_index).to_bytes(4, "little")
-            data[offset + 32 : offset + 36] = int(2 + slot_index).to_bytes(4, "little")
-            data[offset + 36 : offset + 40] = int(pixel_index).to_bytes(4, "little")
+            ray_offset = GZIP_HEADER_LEN + pixel_index * BATCH_POINT_LEN * ECHO_COUNT + slot_index * SLOT_DATA_SIZE
+            for echo_index in range(ECHO_COUNT):
+                offset = ray_offset + echo_index * BATCH_POINT_LEN
+                x = base_x + slot_index * 10.0 + pixel_index + echo_index * 0.25
+                y = x + 0.1
+                z = x + 0.2
+                struct.pack_into("<f", data, offset, x)
+                struct.pack_into("<f", data, offset + 4, y)
+                struct.pack_into("<f", data, offset + 8, z)
+                struct.pack_into("<f", data, offset + 16, 80.0 + slot_index)
+                struct.pack_into("<f", data, offset + 20, 30.0 + pixel_index)
+                data[offset + 24 : offset + 28] = int(2 + pixel_index + echo_index).to_bytes(4, "little")
+                data[offset + 32 : offset + 36] = int(2 + slot_index).to_bytes(4, "little")
+                data[offset + 36 : offset + 40] = int(pixel_index).to_bytes(4, "little")
     path.write_bytes(data)

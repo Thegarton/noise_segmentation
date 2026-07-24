@@ -87,8 +87,10 @@ def load_hl320_csv(path: str | Path) -> HL320Frame:
     return HL320Frame(frame_id=source.stem, path=source, points=points, columns=columns, fields=fields)
 
 
-def build_hl320_features(frame: HL320Frame) -> np.ndarray:
+def build_hl320_features(frame: HL320Frame, *, echo_frame: HL320Frame | None = None) -> np.ndarray:
     groups = group_echo_returns(frame)
+    if echo_frame is not None:
+        groups = project_echo_context_to_frame(frame, echo_frame)
     point_count = frame.point_count
     block_id = _field(frame, "block_id", fill=-1.0)
     cxd = _field(frame, "cxd")
@@ -116,6 +118,69 @@ def build_hl320_features(frame: HL320Frame) -> np.ndarray:
         raise AssertionError(f"Unexpected HL320 feature shape: {features.shape}")
     features[~np.isfinite(features)] = 0.0
     return features.astype(np.float32, copy=False)
+
+
+def project_echo_context_to_frame(frame: HL320Frame, echo_frame: HL320Frame) -> EchoGroups:
+    point_count = frame.point_count
+    default_row_indices = np.arange(point_count, dtype=np.int64).reshape(point_count, 1)
+    defaults = EchoGroups(
+        row_indices=default_row_indices,
+        echo_ids=np.asarray([-1], dtype=np.int32),
+        group_keys=np.arange(point_count, dtype=np.int64).reshape(point_count, 1),
+        return_count_by_row=np.ones(point_count, dtype=np.int32),
+        echo_rank_by_distance=np.zeros(point_count, dtype=np.int32),
+        nearest_echo_distance_delta=np.zeros(point_count, dtype=np.float32),
+        strongest_echo_intensity_delta=np.zeros(point_count, dtype=np.float32),
+    )
+
+    slot = _field(frame, "slot")
+    pixel = _field(frame, "pixel")
+    if not (np.all(np.isfinite(slot)) and np.all(np.isfinite(pixel))):
+        return defaults
+
+    echo_slot = _field(echo_frame, "slot")
+    echo_pixel = _field(echo_frame, "pixel")
+    if not (np.all(np.isfinite(echo_slot)) and np.all(np.isfinite(echo_pixel))):
+        return defaults
+
+    echo_groups = group_echo_returns(echo_frame)
+    echo_block_id = _field(echo_frame, "block_id", fill=-1.0)
+    key_to_echo_rows: dict[tuple[int, int], list[int]] = {}
+    for row_index, key in enumerate(zip(echo_slot.astype(np.int64), echo_pixel.astype(np.int64), strict=False)):
+        key_to_echo_rows.setdefault((int(key[0]), int(key[1])), []).append(row_index)
+
+    block_id = _field(frame, "block_id", fill=0.0)
+    return_count = defaults.return_count_by_row.copy()
+    echo_rank = defaults.echo_rank_by_distance.copy()
+    nearest_delta = defaults.nearest_echo_distance_delta.copy()
+    strongest_delta = defaults.strongest_echo_intensity_delta.copy()
+    row_indices = np.full((point_count, max(1, len(echo_groups.echo_ids))), -1, dtype=np.int64)
+
+    for row_index, key in enumerate(zip(slot.astype(np.int64), pixel.astype(np.int64), strict=False)):
+        echo_rows = key_to_echo_rows.get((int(key[0]), int(key[1])))
+        if not echo_rows:
+            continue
+        desired_block = int(block_id[row_index]) if np.isfinite(block_id[row_index]) else 0
+        chosen_echo_row = next(
+            (echo_row for echo_row in echo_rows if int(echo_block_id[echo_row]) == desired_block),
+            echo_rows[0],
+        )
+        return_count[row_index] = len(echo_rows)
+        echo_rank[row_index] = echo_groups.echo_rank_by_distance[chosen_echo_row]
+        nearest_delta[row_index] = echo_groups.nearest_echo_distance_delta[chosen_echo_row]
+        strongest_delta[row_index] = echo_groups.strongest_echo_intensity_delta[chosen_echo_row]
+        for column_index, echo_row in enumerate(echo_rows[: row_indices.shape[1]]):
+            row_indices[row_index, column_index] = echo_row
+
+    return EchoGroups(
+        row_indices=row_indices,
+        echo_ids=echo_groups.echo_ids,
+        group_keys=np.stack([slot.astype(np.int64), pixel.astype(np.int64)], axis=1),
+        return_count_by_row=return_count,
+        echo_rank_by_distance=echo_rank,
+        nearest_echo_distance_delta=nearest_delta,
+        strongest_echo_intensity_delta=strongest_delta,
+    )
 
 
 def group_echo_returns(frame: HL320Frame) -> EchoGroups:
