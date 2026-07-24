@@ -160,10 +160,13 @@ def project_echo_context_to_frame(frame: HL320Frame, echo_frame: HL320Frame) -> 
     if not (np.all(np.isfinite(echo_slot)) and np.all(np.isfinite(echo_pixel))):
         return defaults
 
+    valid_echo = valid_return_mask(echo_frame.points)
     echo_groups = group_echo_returns(echo_frame)
     echo_block_id = _field(echo_frame, "block_id", fill=-1.0)
     key_to_echo_rows: dict[tuple[int, int], list[int]] = {}
     for row_index, key in enumerate(zip(echo_slot.astype(np.int64), echo_pixel.astype(np.int64), strict=False)):
+        if not valid_echo[row_index]:
+            continue
         key_to_echo_rows.setdefault((int(key[0]), int(key[1])), []).append(row_index)
 
     block_id = _field(frame, "block_id", fill=0.0)
@@ -207,6 +210,7 @@ def group_echo_returns(frame: HL320Frame) -> EchoGroups:
     block_id = _field(frame, "block_id", fill=-1.0)
     distance = _field(frame, "distance")
     intensity = frame.points[:, 3]
+    valid_return = valid_return_mask(frame.points)
 
     if not (np.all(np.isfinite(slot)) and np.all(np.isfinite(pixel))):
         row_indices = np.arange(point_count, dtype=np.int64).reshape(point_count, 1)
@@ -214,7 +218,7 @@ def group_echo_returns(frame: HL320Frame) -> EchoGroups:
             row_indices=row_indices,
             echo_ids=np.asarray([-1], dtype=np.int32),
             group_keys=np.arange(point_count, dtype=np.int64).reshape(point_count, 1),
-            return_count_by_row=np.ones(point_count, dtype=np.int32),
+            return_count_by_row=valid_return.astype(np.int32, copy=False),
             echo_rank_by_distance=np.zeros(point_count, dtype=np.int32),
             nearest_echo_distance_delta=np.zeros(point_count, dtype=np.float32),
             strongest_echo_intensity_delta=np.zeros(point_count, dtype=np.float32),
@@ -222,15 +226,17 @@ def group_echo_returns(frame: HL320Frame) -> EchoGroups:
 
     key_to_rows: dict[tuple[int, int], list[int]] = {}
     for row_index, key in enumerate(zip(slot.astype(np.int64), pixel.astype(np.int64), strict=False)):
+        if not valid_return[row_index]:
+            continue
         key_to_rows.setdefault((int(key[0]), int(key[1])), []).append(row_index)
 
-    echo_ids = sorted({int(value) for value in block_id[np.isfinite(block_id)]})
+    echo_ids = sorted({int(value) for value in block_id[valid_return & np.isfinite(block_id)]})
     if not echo_ids:
         echo_ids = [-1]
     echo_to_col = {echo_id: index for index, echo_id in enumerate(echo_ids)}
     group_keys = np.asarray(list(key_to_rows), dtype=np.int64)
     row_indices = np.full((len(key_to_rows), len(echo_ids)), -1, dtype=np.int64)
-    return_count = np.ones(point_count, dtype=np.int32)
+    return_count = np.zeros(point_count, dtype=np.int32)
     echo_rank = np.zeros(point_count, dtype=np.int32)
     nearest_delta = np.zeros(point_count, dtype=np.float32)
     strongest_delta = np.zeros(point_count, dtype=np.float32)
@@ -259,6 +265,13 @@ def group_echo_returns(frame: HL320Frame) -> EchoGroups:
         nearest_echo_distance_delta=nearest_delta,
         strongest_echo_intensity_delta=strongest_delta,
     )
+
+
+def valid_return_mask(points: np.ndarray) -> np.ndarray:
+    xyz = np.asarray(points, dtype=np.float32)[:, :3]
+    finite = np.all(np.isfinite(xyz), axis=1)
+    nonzero = np.linalg.norm(xyz, axis=1) > 1e-8
+    return finite & nonzero
 
 
 def _read_table(path: Path) -> tuple[list[list[str]], list[str]]:

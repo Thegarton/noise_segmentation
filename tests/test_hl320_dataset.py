@@ -5,7 +5,13 @@ from pathlib import Path
 
 import numpy as np
 
-from autolabeler.hl320.csv_points import HL320_FEATURE_NAMES, build_hl320_features, group_echo_returns, load_hl320_csv
+from autolabeler.hl320.csv_points import (
+    HL320_FEATURE_NAMES,
+    build_hl320_features,
+    group_echo_returns,
+    load_hl320_csv,
+    primary_returns_frame,
+)
 from autolabeler.hl320.dataset import build_hl320_dataset, class_aware_split
 
 
@@ -30,6 +36,28 @@ def test_hl320_csv_preserves_row_order_and_groups_echoes(tmp_path: Path):
     assert groups.echo_rank_by_distance.tolist() == [0, 1, 0]
     assert features.shape == (3, len(HL320_FEATURE_NAMES))
     assert features[0, HL320_FEATURE_NAMES.index("has_camera_projection")] == 1.0
+
+
+def test_zero_xyz_echo_rows_are_not_counted_as_real_returns(tmp_path: Path):
+    csv_path = tmp_path / "000002.csv"
+    csv_path.write_text(
+        "x y z azimuth vertical intensity reflectivity slot pixel blockID Cxd Cyd\n"
+        "0.008 0.800 0.634 89.35 38.38 0 3 2 0 0 294.9 173.2\n"
+        "0.000 0.000 0.000 89.35 38.38 0 0 2 0 1 294.9 173.2\n"
+        "0.000 0.000 0.000 89.35 38.38 0 0 2 0 2 294.9 173.2\n",
+        encoding="utf-8",
+    )
+
+    echo_frame = load_hl320_csv(csv_path)
+    primary = primary_returns_frame(echo_frame)
+    groups = group_echo_returns(echo_frame)
+    features = build_hl320_features(primary, echo_frame=echo_frame)
+
+    assert groups.return_count_by_row.tolist() == [1, 0, 0]
+    assert features.shape == (1, len(HL320_FEATURE_NAMES))
+    assert features[0, HL320_FEATURE_NAMES.index("return_count")] == 1.0
+    assert features[0, HL320_FEATURE_NAMES.index("nearest_echo_distance_delta")] == 0.0
+    assert features[0, HL320_FEATURE_NAMES.index("strongest_echo_intensity_delta")] == 0.0
 
 
 def test_class_aware_split_keeps_single_frame_class_in_train():
