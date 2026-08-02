@@ -15,6 +15,28 @@ PYTHONPATH=src python scripts/prepare_camera_frames.py \
   --out-dir ./output/camera_frames
 ```
 
+For a circular fisheye camera, rectify frames before SAM3 with the OpenCV remapper. Output resolution and aspect ratio are independent from the source circle; the mapping changes the virtual camera FOV instead of geometrically stretching the circle into a rectangle:
+
+```bash
+PYTHONPATH=src python scripts/rectify_fisheye_opencv.py \
+  --image /path/to/img2/000000.jpg \
+  --output ./output/rectified/000000.jpg \
+  --output-size 3840x2160 \
+  --format circular \
+  --dtype linear \
+  --projection perspective \
+  --fov 180 \
+  --pfov 110 \
+  --pfov-axis horizontal \
+  --xcenter 960 \
+  --ycenter 768 \
+  --radius 768 \
+  --interpolation lanczos \
+  --save-map
+```
+
+Use `--auto-circle` instead of explicit center/radius only when the lens circle has a clean black border. `perspective` is the normal choice for SAM3 and other image models. `cylindrical` retains a wider horizontal view with less edge stretching, but its geometry is less similar to a conventional pinhole camera. Increasing `--output-size` improves sampling and downstream working resolution, but cannot restore detail absent from the source image.
+
 2. Run SAM3 as a camera teacher. For image folders, use the single-image runner:
 
 ```bash
@@ -78,7 +100,35 @@ python3 export_from_point_labeler.py \
 
 Flat HL320 exports use `semantic_mask.npy` with shape `[N]`. The point index is the original CSV row index after invalid points are handled by downstream training.
 
-6. Build the clean HL320 dataset format for the next model stage:
+6. Import the new external HL320 manual JSON format when labels come from the new annotation tool.
+
+In this format `indices` are original CSV row numbers, including all echo-channel rows. The importer writes both training labels and a point_labeler dataset:
+
+```bash
+PYTHONPATH=src python scripts/import_hl320_manual_json_labels.py \
+  --csv-dir /path/to/csv_all_echo \
+  --annotation-dir /path/to/RoadTest/label \
+  --out-dir ./output/HL320_manual_json_import \
+  --classes-yaml configs/classes.yaml \
+  --image-dir /path/to/img2 \
+  --overwrite
+```
+
+Important outputs:
+
+- `manual_labels/<frame>/semantic_mask.npy`: one label per original CSV row, including echo rows;
+- `manual_labels/<frame>/primary_semantic_mask.npy`: convenience mask for `blockID == 0`;
+- `point_labeler/velodyne/<frame>.bin` and `point_labeler/labels/<frame>.label`: point_labeler-compatible flat semantic labels;
+- `point_labeler/labels.xml`, `settings.cfg`, `bridge_manifest.json`.
+
+For custom object names from the annotation tool, pass mappings like:
+
+```bash
+--class-map "串扰=crosstalk_noise_1" \
+--class-map "路牌=traffic_sign"
+```
+
+7. Build the clean HL320 dataset format for the next model stage:
 
 ```bash
 PYTHONPATH=src python scripts/build_hl320_dataset.py \
@@ -95,7 +145,23 @@ This writes `dataset/{train,val}/<frame>/coord.npy`, `features.npy`, `strength.n
 `features.npy` is the explicit HL320 feature matrix. `strength.npy` contains the same matrix because LitePT `DefaultDataset` only loads known asset names.
 `segment.npy` uses dense training ids `0..N-1`; original source ids are preserved in `hl320_dataset_manifest.json`.
 
-7. Train LitePT from scratch on the clean HL320 dataset:
+For the new all-echo manual JSON labels, use the imported labels and train on every echo row:
+
+```bash
+PYTHONPATH=src python scripts/build_hl320_dataset.py \
+  --csv-dir /path/to/csv_all_echo \
+  --labels-dir ./output/HL320_manual_json_import/manual_labels \
+  --classes-yaml configs/classes.yaml \
+  --output-dir ./output/HL320_dataset_all_echo_v1 \
+  --return-mode all \
+  --val-ratio 0.2 \
+  --seed 42 \
+  --overwrite
+```
+
+Without `--return-mode all`, the builder keeps the older primary-only behavior and selects only `blockID == 0` rows.
+
+8. Train LitePT from scratch on the clean HL320 dataset:
 
 ```bash
 PYTHONPATH=src /home/a60116606/miniconda3/envs/litept/bin/python scripts/train_hl320_litept_from_scratch.py \
@@ -118,7 +184,7 @@ PYTHONPATH=src /home/a60116606/miniconda3/envs/litept/bin/python scripts/train_h
 Use `--dry-run` to validate the dataset and config plan without importing PyTorch/CUDA. Use `--prepare-only` to write the LitePT config and manifests without starting training.
 This path does not load a Waymo/NuScenes checkpoint. The LitePT head and backbone are initialized from scratch, and the generated config sets `backbone.in_channels = 3 + len(HL320 features)`.
 
-8. Fine-tune LitePT as the older transition baseline when you specifically want to reuse the Waymo backbone:
+9. Fine-tune LitePT as the older transition baseline when you specifically want to reuse the Waymo backbone:
 
 ```bash
 PYTHONPATH=src /home/a60116606/miniconda3/envs/litept/bin/python scripts/finetune_litept.py \
@@ -139,7 +205,7 @@ PYTHONPATH=src /home/a60116606/miniconda3/envs/litept/bin/python scripts/finetun
   --force-torch-pointrope
 ```
 
-9. Run a trained LitePT model on flat HL320 CSV frames.
+10. Run a trained LitePT model on flat HL320 CSV frames.
 
 For the new from-scratch HL320 model:
 
@@ -151,9 +217,12 @@ PYTHONPATH=src /home/a60116606/miniconda3/envs/litept/bin/python scripts/run_lit
   --checkpoint ./output/HL320_litept_from_scratch/experiment/model/model_best.pth \
   --litept-config ./output/HL320_litept_from_scratch/hl320_litept_config.py \
   --feature-mode hl320 \
+  --return-mode all \
   --device cuda:0 \
   --force-torch-pointrope
 ```
+
+Use `--return-mode all` for models trained from `build_hl320_dataset.py --return-mode all`; otherwise the inference output will be primary-only.
 
 For the older Waymo fine-tune transition baseline:
 
@@ -167,7 +236,7 @@ PYTHONPATH=src /home/a60116606/miniconda3/envs/litept/bin/python scripts/run_lit
   --force-torch-pointrope
 ```
 
-10. Fuse LitePT point predictions with SAM3 image predictions.
+11. Fuse LitePT point predictions with SAM3 image predictions.
 
 ```bash
 PYTHONPATH=src python scripts/fuse_hl320_point_predictions.py \

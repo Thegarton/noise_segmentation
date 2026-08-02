@@ -217,7 +217,7 @@ def update_confusion(confusion: dict[tuple[int, int], int], gt: np.ndarray, pred
         return
     pairs = np.stack([gt, pred], axis=1)
     unique_pairs, counts = np.unique(pairs, axis=0, return_counts=True)
-    for pair, count in zip(unique_pairs, counts, strict=False):
+    for pair, count in zip(unique_pairs, counts):
         key = (int(pair[0]), int(pair[1]))
         confusion[key] = int(confusion.get(key, 0)) + int(count)
 
@@ -315,7 +315,7 @@ def counts_dict(values: np.ndarray) -> dict[str, int]:
     if values.size == 0:
         return {}
     unique, counts = np.unique(values.astype(np.int64, copy=False), return_counts=True)
-    return {str(int(value)): int(count) for value, count in zip(unique, counts, strict=False)}
+    return {str(int(value)): int(count) for value, count in zip(unique, counts)}
 
 
 def confusion_to_json(confusion: dict[tuple[int, int], int]) -> list[dict[str, int]]:

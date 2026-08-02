@@ -696,7 +696,7 @@ def angular_density_features(azimuth: np.ndarray, vertical: np.ndarray, *, bin_d
     cell_counts: dict[tuple[int, int], int] = {}
     rows: dict[int, int] = {}
     cols: dict[int, int] = {}
-    for az, vv in zip(az_bin[valid], v_bin[valid], strict=False):
+    for az, vv in zip(az_bin[valid], v_bin[valid]):
         cell_counts[(int(az), int(vv))] = cell_counts.get((int(az), int(vv)), 0) + 1
         cols[int(az)] = cols.get(int(az), 0) + 1
         rows[int(vv)] = rows.get(int(vv), 0) + 1

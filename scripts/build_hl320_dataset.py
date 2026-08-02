@@ -47,6 +47,7 @@ def main() -> None:
         seed=args.seed,
         overwrite=args.overwrite,
         prepare_output=not bool(args.bin_dir),
+        return_mode=args.return_mode,
     )
     print(
         json.dumps(
@@ -86,6 +87,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--classes-yaml", default=str(REPO_ROOT / "configs" / "classes.yaml"))
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--return-mode",
+        choices=("primary", "all"),
+        default="primary",
+        help="primary keeps only blockID == 0 rows; all trains on every echo row from the CSV.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 

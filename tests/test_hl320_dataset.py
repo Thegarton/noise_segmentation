@@ -130,3 +130,92 @@ def test_build_hl320_dataset_writes_coord_features_segment_and_manifest(tmp_path
         assert segment.shape == (2,)
         assert set(segment.tolist()) <= {0, 1}
         assert (frame_dir / "metadata.json").is_file()
+
+
+def test_build_hl320_dataset_accepts_all_echo_labels_and_selects_primary_rows(tmp_path: Path):
+    csv_dir = tmp_path / "csv"
+    labels_dir = tmp_path / "labels"
+    classes_yaml = tmp_path / "classes.yaml"
+    csv_dir.mkdir()
+    labels_dir.mkdir()
+    classes_yaml.write_text(
+        "semantic_classes:\n"
+        "  background: 0\n"
+        "  CAR: 2\n"
+        "  PEDESTRIAN: 5\n"
+        "  ignore: 255\n",
+        encoding="utf-8",
+    )
+    for frame_id in ("000000", "000001"):
+        (csv_dir / f"{frame_id}.csv").write_text(
+            "x y z intensity slot pixel blockID Cxd Cyd\n"
+            "1 0 0 10 2 0 0 10 20\n"
+            "2 0 0 20 2 0 1 10 20\n"
+            "3 0 0 30 2 1 0 11 21\n",
+            encoding="utf-8",
+        )
+        frame_label_dir = labels_dir / frame_id
+        frame_label_dir.mkdir()
+        np.save(frame_label_dir / "semantic_mask.npy", np.asarray([2, 255, 5], dtype=np.uint16))
+
+    result = build_hl320_dataset(
+        csv_dir=csv_dir,
+        labels_dir=labels_dir,
+        output_dir=tmp_path / "out",
+        classes_yaml=classes_yaml,
+        val_ratio=0.0,
+        seed=1,
+        overwrite=True,
+    )
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert {frame["source_label_layout"] for frame in manifest["frames"]} == {"all_returns_selected_primary"}
+    for frame_dir in (result.output_dir / "dataset" / "train").iterdir():
+        segment = np.load(frame_dir / "segment.npy")
+        assert segment.shape == (2,)
+        assert segment.tolist() == [0, 1]
+
+
+def test_build_hl320_dataset_all_return_mode_trains_on_echo_rows(tmp_path: Path):
+    csv_dir = tmp_path / "csv"
+    labels_dir = tmp_path / "labels"
+    classes_yaml = tmp_path / "classes.yaml"
+    csv_dir.mkdir()
+    labels_dir.mkdir()
+    classes_yaml.write_text(
+        "semantic_classes:\n"
+        "  background: 0\n"
+        "  CAR: 2\n"
+        "  crosstalk_noise_1: 15\n"
+        "  ignore: 255\n",
+        encoding="utf-8",
+    )
+    for frame_id in ("000000", "000001"):
+        (csv_dir / f"{frame_id}.csv").write_text(
+            "x y z intensity slot pixel blockID Cxd Cyd\n"
+            "1 0 0 10 2 0 0 10 20\n"
+            "2 0 0 20 2 0 1 10 20\n"
+            "3 0 0 30 2 1 0 11 21\n",
+            encoding="utf-8",
+        )
+        frame_label_dir = labels_dir / frame_id
+        frame_label_dir.mkdir()
+        np.save(frame_label_dir / "semantic_mask.npy", np.asarray([2, 15, 2], dtype=np.uint16))
+
+    result = build_hl320_dataset(
+        csv_dir=csv_dir,
+        labels_dir=labels_dir,
+        output_dir=tmp_path / "out",
+        classes_yaml=classes_yaml,
+        val_ratio=0.0,
+        seed=1,
+        overwrite=True,
+        return_mode="all",
+    )
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["return_mode"] == "all"
+    for frame_dir in (result.output_dir / "dataset" / "train").iterdir():
+        segment = np.load(frame_dir / "segment.npy")
+        assert segment.shape == (3,)
+        assert segment.tolist() == [0, 1, 0]

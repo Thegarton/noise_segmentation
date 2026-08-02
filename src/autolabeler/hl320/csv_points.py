@@ -88,10 +88,7 @@ def load_hl320_csv(path: str | Path) -> HL320Frame:
 
 
 def primary_returns_frame(frame: HL320Frame) -> HL320Frame:
-    block_id = frame.fields.get("block_id")
-    if block_id is None:
-        return frame
-    primary = np.isfinite(block_id) & (block_id.astype(np.int64) == 0)
+    primary = primary_return_mask(frame)
     if not np.any(primary):
         raise ValueError(f"HL320 CSV {frame.path} has blockID column but no blockID == 0 rows")
     fields = {name: values[primary].copy() for name, values in frame.fields.items()}
@@ -102,6 +99,14 @@ def primary_returns_frame(frame: HL320Frame) -> HL320Frame:
         columns=frame.columns,
         fields=fields,
     )
+
+
+def primary_return_mask(frame: HL320Frame) -> np.ndarray:
+    block_id = frame.fields.get("block_id")
+    if block_id is None:
+        return np.ones(frame.point_count, dtype=bool)
+    primary = np.isfinite(block_id) & (block_id.astype(np.int64) == 0)
+    return primary
 
 
 def build_hl320_features(frame: HL320Frame, *, echo_frame: HL320Frame | None = None) -> np.ndarray:
@@ -164,7 +169,7 @@ def project_echo_context_to_frame(frame: HL320Frame, echo_frame: HL320Frame) -> 
     echo_groups = group_echo_returns(echo_frame)
     echo_block_id = _field(echo_frame, "block_id", fill=-1.0)
     key_to_echo_rows: dict[tuple[int, int], list[int]] = {}
-    for row_index, key in enumerate(zip(echo_slot.astype(np.int64), echo_pixel.astype(np.int64), strict=False)):
+    for row_index, key in enumerate(zip(echo_slot.astype(np.int64), echo_pixel.astype(np.int64))):
         if not valid_echo[row_index]:
             continue
         key_to_echo_rows.setdefault((int(key[0]), int(key[1])), []).append(row_index)
@@ -176,7 +181,7 @@ def project_echo_context_to_frame(frame: HL320Frame, echo_frame: HL320Frame) -> 
     strongest_delta = defaults.strongest_echo_intensity_delta.copy()
     row_indices = np.full((point_count, max(1, len(echo_groups.echo_ids))), -1, dtype=np.int64)
 
-    for row_index, key in enumerate(zip(slot.astype(np.int64), pixel.astype(np.int64), strict=False)):
+    for row_index, key in enumerate(zip(slot.astype(np.int64), pixel.astype(np.int64))):
         echo_rows = key_to_echo_rows.get((int(key[0]), int(key[1])))
         if not echo_rows:
             continue
@@ -225,7 +230,7 @@ def group_echo_returns(frame: HL320Frame) -> EchoGroups:
         )
 
     key_to_rows: dict[tuple[int, int], list[int]] = {}
-    for row_index, key in enumerate(zip(slot.astype(np.int64), pixel.astype(np.int64), strict=False)):
+    for row_index, key in enumerate(zip(slot.astype(np.int64), pixel.astype(np.int64))):
         if not valid_return[row_index]:
             continue
         key_to_rows.setdefault((int(key[0]), int(key[1])), []).append(row_index)

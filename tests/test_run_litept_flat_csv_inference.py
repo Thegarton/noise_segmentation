@@ -49,6 +49,23 @@ def test_hl320_feature_mode_builds_multichannel_strength(tmp_path: Path):
     assert frame["strength"].shape[1] > 1
 
 
+def test_hl320_feature_mode_can_predict_all_echo_rows(tmp_path: Path):
+    script = load_script()
+    csv_path = tmp_path / "000000.csv"
+    csv_path.write_text(
+        "x y z azimuth vertical intensity reflectivity slot pixel blockID Cxd Cyd\n"
+        "1 0 0 89 38 3 4 2 0 1 294.1 173.2\n"
+        "2 0 0 88 37 6 7 2 0 0 294.1 173.2\n",
+        encoding="utf-8",
+    )
+
+    frame = script.load_inference_frame(csv_path, feature_mode="hl320", return_mode="all")
+
+    assert frame["points"].shape == (2, 4)
+    assert frame["strength"].shape[0] == 2
+    assert frame["return_mode"] == "all"
+
+
 def test_dry_run_resolves_finetune_artifacts_without_importing_litept(tmp_path: Path):
     script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_litept_flat_csv_inference.py"
     csv_dir = tmp_path / "csv"
@@ -87,6 +104,7 @@ def test_dry_run_resolves_finetune_artifacts_without_importing_litept(tmp_path: 
     assert payload["checkpoint"].endswith("experiment/model/model_best.pth")
     assert payload["litept_config"].endswith("litept_custom_config.py")
     assert payload["feature_mode"] == "auto"
+    assert payload["return_mode"] == "primary"
 
 
 def load_script():

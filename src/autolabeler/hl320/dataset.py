@@ -10,7 +10,7 @@ import numpy as np
 
 from autolabeler.data.class_config import load_semantic_classes
 
-from .csv_points import HL320_FEATURE_NAMES, build_hl320_features, load_hl320_csv, primary_returns_frame
+from .csv_points import HL320_FEATURE_NAMES, build_hl320_features, load_hl320_csv, primary_return_mask, primary_returns_frame
 
 
 IGNORE_ID = 255
@@ -36,6 +36,7 @@ def build_hl320_dataset(
     overwrite: bool = False,
     ignore_id: int = IGNORE_ID,
     prepare_output: bool = True,
+    return_mode: str = "primary",
 ) -> HL320DatasetBuildResult:
     csv_root = Path(csv_dir).expanduser().resolve()
     labels_root = Path(labels_dir).expanduser().resolve()
@@ -54,6 +55,8 @@ def build_hl320_dataset(
     }
     if not 0.0 <= val_ratio < 1.0:
         raise ValueError(f"val_ratio must be in [0, 1), got {val_ratio}")
+    if return_mode not in {"primary", "all"}:
+        raise ValueError(f"return_mode must be 'primary' or 'all', got {return_mode!r}")
     if prepare_output:
         _prepare_output_dir(out_root, overwrite=overwrite)
     else:
@@ -68,11 +71,19 @@ def build_hl320_dataset(
     frame_infos = []
     for csv_path in csv_paths:
         echo_frame = load_hl320_csv(csv_path)
-        frame = primary_returns_frame(echo_frame)
+        primary_mask = primary_return_mask(echo_frame)
+        frame = echo_frame if return_mode == "all" else primary_returns_frame(echo_frame)
         labels_path = resolve_label_path(labels_root, frame.frame_id)
-        labels = load_flat_labels(labels_path, expected_points=frame.point_count)
+        labels, label_layout = load_flat_labels(
+            labels_path,
+            expected_points=frame.point_count,
+            expected_all_points=echo_frame.point_count,
+            primary_mask=primary_mask if return_mode == "primary" else None,
+        )
+        if return_mode == "all" and label_layout == "primary_returns":
+            label_layout = "all_returns"
         valid = valid_xyz_mask(frame.points)
-        features = build_hl320_features(frame, echo_frame=echo_frame)
+        features = build_hl320_features(frame, echo_frame=echo_frame if return_mode == "primary" else None)
         source_counts = _class_counts(labels[valid], ignore_ids=ignore_source_ids)
         unknown_source_ids = sorted(
             int(value)
@@ -84,6 +95,7 @@ def build_hl320_dataset(
                 "frame_id": frame.frame_id,
                 "csv_path": csv_path,
                 "labels_path": labels_path,
+                "label_layout": label_layout,
                 "points": frame.points,
                 "features": features,
                 "labels": labels,
@@ -122,7 +134,8 @@ def build_hl320_dataset(
         "version": 1,
         "format": "hl320_pointwise_v1",
         "csv_dir": str(csv_root),
-        "csv_layout": "all_returns_with_primary_block_id_0",
+        "csv_layout": "all_returns" if return_mode == "all" else "all_returns_with_primary_block_id_0",
+        "return_mode": return_mode,
         "labels_dir": str(labels_root),
         "output_dir": str(out_root),
         "classes_yaml": str(classes_path),
@@ -162,8 +175,10 @@ def build_hl320_dataset(
             "frame_id": frame_id,
             "split": split,
             "source_csv": str(info["csv_path"]),
-            "primary_return": "blockID == 0",
+            "primary_return": "all blockID rows" if return_mode == "all" else "blockID == 0",
+            "return_mode": return_mode,
             "source_labels": str(info["labels_path"]),
+            "source_label_layout": str(info["label_layout"]),
             "raw_points": int(np.asarray(info["points"]).shape[0]),
             "valid_points": int(coord.shape[0]),
             "dropped_points": int(np.asarray(info["points"]).shape[0] - coord.shape[0]),
@@ -204,14 +219,37 @@ def resolve_label_path(labels_root: Path, frame_id: str) -> Path:
     raise FileNotFoundError(f"No flat label mask found for frame {frame_id!r} under {labels_root}")
 
 
-def load_flat_labels(path: Path, *, expected_points: int) -> np.ndarray:
+def load_flat_labels(
+    path: Path,
+    *,
+    expected_points: int,
+    expected_all_points: int | None = None,
+    primary_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, str]:
     labels = np.load(path, allow_pickle=False)
     arr = np.asarray(labels)
-    if arr.shape != (expected_points,):
-        raise ValueError(f"Labels {path} have shape {arr.shape}, expected {(expected_points,)}")
     if not np.issubdtype(arr.dtype, np.integer):
         raise ValueError(f"Labels {path} dtype must be integer, got {arr.dtype}")
-    return arr.astype(np.int32, copy=False)
+    if arr.shape == (expected_points,):
+        return arr.astype(np.int32, copy=False), "primary_returns"
+    if expected_all_points is not None and arr.shape == (expected_all_points,):
+        if primary_mask is None:
+            raise ValueError(f"Labels {path} are all-return labels, but no primary_return_mask was provided")
+        primary = np.asarray(primary_mask, dtype=bool)
+        if primary.shape != (expected_all_points,):
+            raise ValueError(
+                f"primary_return_mask has shape {primary.shape}, expected {(expected_all_points,)} for labels {path}"
+            )
+        selected = arr[primary]
+        if selected.shape != (expected_points,):
+            raise ValueError(
+                f"Selecting primary labels from {path} produced shape {selected.shape}, expected {(expected_points,)}"
+            )
+        return selected.astype(np.int32, copy=False), "all_returns_selected_primary"
+    expected = [(expected_points,)]
+    if expected_all_points is not None:
+        expected.append((expected_all_points,))
+    raise ValueError(f"Labels {path} have shape {arr.shape}, expected one of {expected}")
 
 
 def valid_xyz_mask(points: np.ndarray) -> np.ndarray:
@@ -315,7 +353,7 @@ def _class_counts(labels: np.ndarray, *, ignore_ids: set[int]) -> dict[int, int]
     values, counts = np.unique(labels, return_counts=True)
     return {
         int(value): int(count)
-        for value, count in zip(values, counts, strict=False)
+        for value, count in zip(values, counts)
         if int(value) not in ignore_ids
     }
 

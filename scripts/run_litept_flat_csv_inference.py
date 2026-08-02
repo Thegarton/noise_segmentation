@@ -51,6 +51,7 @@ def main() -> None:
                     "checkpoint": str(checkpoint),
                     "litept_config": str(litept_config),
                     "feature_mode": args.feature_mode,
+                    "return_mode": args.return_mode,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -77,7 +78,7 @@ def main() -> None:
             frames.append({"frame_id": csv_path.stem, "status": "exists"})
             continue
         print(f"[{index:04d}/{len(csv_paths):04d}] {csv_path}", file=sys.stderr, flush=True)
-        frame = load_inference_frame(csv_path, feature_mode=feature_mode)
+        frame = load_inference_frame(csv_path, feature_mode=feature_mode, return_mode=args.return_mode)
         result = predict_flat_points(model, frame["points"], strength=frame["strength"])
         frame_out = out_dir / frame["frame_id"]
         frame_out.mkdir(parents=True, exist_ok=True)
@@ -92,6 +93,7 @@ def main() -> None:
             checkpoint=checkpoint,
             litept_config=litept_config,
             feature_mode=feature_mode,
+            return_mode=args.return_mode,
         )
         (frame_out / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         frames.append(
@@ -120,6 +122,7 @@ def main() -> None:
         "training_id_to_source_id": model.training_id_to_source_id or list(range(model.num_classes)),
         "output_ignore_index": model.output_ignore_index,
         "feature_mode": feature_mode,
+        "return_mode": args.return_mode,
         "frames": frames,
     }
     manifest_path = out_dir / "litept_flat_csv_inference_manifest.json"
@@ -142,6 +145,12 @@ def parse_args() -> argparse.Namespace:
         choices=("auto", "legacy_intensity", "hl320"),
         default="auto",
         help="legacy_intensity uses only XYZI intensity; hl320 uses the same feature matrix as build_hl320_dataset.py.",
+    )
+    parser.add_argument(
+        "--return-mode",
+        choices=("primary", "all"),
+        default="primary",
+        help="For --feature-mode hl320: primary keeps blockID == 0, all predicts every echo row.",
     )
     parser.add_argument("--force-torch-pointrope", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
@@ -236,19 +245,28 @@ def load_flat_csv(path: Path) -> dict[str, Any]:
     }
 
 
-def load_inference_frame(path: Path, *, feature_mode: str) -> dict[str, Any]:
+def load_inference_frame(path: Path, *, feature_mode: str, return_mode: str = "primary") -> dict[str, Any]:
     if feature_mode == "hl320":
         echo_frame = load_hl320_csv(path)
-        frame = primary_returns_frame(echo_frame)
+        if return_mode == "all":
+            frame = echo_frame
+            strength = build_hl320_features(frame)
+        elif return_mode == "primary":
+            frame = primary_returns_frame(echo_frame)
+            strength = build_hl320_features(frame, echo_frame=echo_frame)
+        else:
+            raise ValueError(f"return_mode must be 'primary' or 'all', got {return_mode!r}")
         return {
             "frame_id": frame.frame_id,
             "points": frame.points,
-            "strength": build_hl320_features(frame, echo_frame=echo_frame),
+            "strength": strength,
             "columns": frame.columns,
             "optional": frame.fields,
+            "return_mode": return_mode,
         }
     frame = load_flat_csv(path)
     frame["strength"] = normalize_litept_strength(frame["points"][:, 3]).reshape(-1, 1)
+    frame["return_mode"] = "all"
     return frame
 
 
@@ -357,6 +375,7 @@ def build_metadata(
     checkpoint: Path,
     litept_config: Path,
     feature_mode: str,
+    return_mode: str,
 ) -> dict[str, Any]:
     source_ids = model.training_id_to_source_id or list(range(model.num_classes))
     semantic = np.asarray(result["semantic_mask"])
@@ -376,6 +395,7 @@ def build_metadata(
         "litept_config": str(litept_config),
         "checkpoint": str(checkpoint),
         "feature_mode": feature_mode,
+        "return_mode": return_mode,
         "feature_names": list(getattr(model.cfg, "feature_names", [])),
         "class_names": model.class_names,
         "num_classes": model.num_classes,
