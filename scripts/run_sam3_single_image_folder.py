@@ -84,7 +84,19 @@ def main() -> None:
     sam3_root = Path(args.sam3_root).expanduser().resolve() if args.sam3_root else None
     model_dir = resolve_model_dir(sam3_root=sam3_root, sam3_model_path=args.sam3_model_path)
     configure_sam3_imports(sam3_root=sam3_root, model_dir=model_dir)
-    predictor = build_predictor(model_dir=model_dir, use_fa3=args.use_fa3)
+    label_min_score_overrides = load_label_min_scores(
+        args.label_min_scores,
+        known_labels=set(label_to_id),
+    )
+    effective_label_min_scores = {
+        label: float(label_min_score_overrides.get(label, args.min_score))
+        for label in label_to_id
+    }
+    predictor = build_predictor(
+        model_dir=model_dir,
+        use_fa3=args.use_fa3,
+        min_score=args.min_score,
+    )
 
     results = []
     for index, image_path in enumerate(image_paths, start=1):
@@ -120,6 +132,7 @@ def main() -> None:
             flat_prompts=flat_prompts,
             label_to_id=label_to_id,
             min_score=args.min_score,
+            label_min_scores=effective_label_min_scores,
             prompt_log=args.prompt_log,
             projection_dir=projection_dir,
             projection_stem_suffixes=tuple(args.projection_stem_suffix),
@@ -136,6 +149,9 @@ def main() -> None:
             "prompt_config": str(Path(args.prompt_config)),
             "classes_yaml": str(Path(args.classes_yaml)),
             "min_score": float(args.min_score),
+            "label_min_scores_file": str(Path(args.label_min_scores).expanduser().resolve()) if args.label_min_scores else None,
+            "label_min_score_overrides": label_min_score_overrides,
+            "effective_label_min_scores": effective_label_min_scores,
             "instances": result.instances,
             "class_pixel_counts": result.class_pixel_counts,
             "projection_dir": str(projection_dir) if projection_dir is not None else None,
@@ -171,6 +187,9 @@ def main() -> None:
         "projection_dir": str(projection_dir) if projection_dir is not None else None,
         "require_projection": bool(args.require_projection),
         "min_score": float(args.min_score),
+        "label_min_scores_file": str(Path(args.label_min_scores).expanduser().resolve()) if args.label_min_scores else None,
+        "label_min_score_overrides": label_min_score_overrides,
+        "effective_label_min_scores": effective_label_min_scores,
         "images": len(image_paths),
         "prompts": len(flat_prompts),
         "labels": label_to_id,
@@ -190,6 +209,7 @@ def process_image(
     flat_prompts: list[tuple[str, str]],
     label_to_id: dict[str, int],
     min_score: float,
+    label_min_scores: dict[str, float],
     prompt_log: bool,
     projection_dir: Path | None,
     projection_stem_suffixes: tuple[str, ...],
@@ -203,19 +223,26 @@ def process_image(
     instances: list[Sam3Instance] = []
     try:
         for prompt_idx, (label, prompt) in enumerate(flat_prompts, start=1):
+            detection_min_score = float(label_min_scores.get(label, min_score))
             if prompt_log:
-                print(f"  [{prompt_idx:03d}/{len(flat_prompts):03d}] {label}: {prompt}", file=sys.stderr, flush=True)
+                print(
+                    f"  [{prompt_idx:03d}/{len(flat_prompts):03d}] "
+                    f"{label}: {prompt} (min_score={detection_min_score:.3f})",
+                    file=sys.stderr,
+                    flush=True,
+                )
             reset_session(predictor, session_id)
+            set_predictor_detection_threshold(predictor, detection_min_score)
             response = add_text_prompt(
                 predictor,
                 session_id=session_id,
                 prompt=prompt,
-                min_score=min_score,
+                min_score=detection_min_score,
             )
             masks, scores, boxes = extract_arrays(response.get("outputs"), height=height, width=width)
             for mask_index in range(masks.shape[0]):
                 score = float(scores[mask_index])
-                if score < min_score:
+                if score < detection_min_score:
                     continue
                 instances.append(
                     Sam3Instance(
@@ -787,20 +814,115 @@ def resolve_model_dir(*, sam3_root: Path | None, sam3_model_path: str | None) ->
     return model_dir
 
 
-def build_predictor(*, model_dir: Path | None, use_fa3: bool) -> Any:
+def build_predictor(*, model_dir: Path | None, use_fa3: bool, min_score: float) -> Any:
     import sam3.model_builder as sam3_model_builder  # noqa: WPS433
 
     builder = sam3_model_builder.build_sam3_multiplex_video_predictor
     kwargs: dict[str, Any] = {
         "use_fa3": bool(use_fa3),
         "async_loading_frames": False,
+        "default_output_prob_thresh": float(min_score),
     }
     if model_dir is not None:
         checkpoint_path = model_dir / "sam3.1_multiplex.pt"
         patch_hf_checkpoint_download(sam3_model_builder, checkpoint_path=checkpoint_path, model_dir=model_dir)
         kwargs["checkpoint_path"] = str(checkpoint_path)
     params = inspect.signature(builder).parameters
-    return builder(**{key: value for key, value in kwargs.items() if key in params})
+    predictor = builder(**{key: value for key, value in kwargs.items() if key in params})
+    set_predictor_detection_threshold(predictor, min_score)
+    return predictor
+
+
+def set_predictor_detection_threshold(predictor: Any, min_score: float) -> None:
+    score = validate_probability(min_score, name="min_score")
+    if not hasattr(predictor, "default_output_prob_thresh"):
+        raise AttributeError("SAM3 predictor has no default_output_prob_thresh attribute")
+    if not hasattr(predictor, "model"):
+        raise AttributeError("SAM3 predictor has no model attribute")
+
+    model_attributes = (
+        "score_threshold_detection",
+        "image_only_det_thresh",
+        "new_det_thresh",
+    )
+    missing = [name for name in model_attributes if not hasattr(predictor.model, name)]
+    if missing:
+        raise AttributeError(f"SAM3 predictor model does not expose threshold attributes: {missing}")
+
+    predictor.default_output_prob_thresh = score
+    for name in model_attributes:
+        setattr(predictor.model, name, score)
+
+
+def load_label_min_scores(
+    path: str | Path | None,
+    *,
+    known_labels: set[str],
+) -> dict[str, float]:
+    if path is None:
+        return {}
+    config_path = Path(path).expanduser().resolve()
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Label min-score config does not exist: {config_path}")
+
+    if config_path.suffix.lower() == ".json":
+        raw_mapping = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(raw_mapping, dict):
+            raise ValueError("Label min-score JSON must contain an object mapping label to score")
+    else:
+        raw_mapping = parse_simple_score_yaml(config_path)
+
+    scores: dict[str, float] = {}
+    for raw_label, raw_score in raw_mapping.items():
+        label = str(raw_label).strip()
+        if not label:
+            raise ValueError(f"Empty label in min-score config: {config_path}")
+        if label in scores:
+            raise ValueError(f"Duplicate label {label!r} in min-score config: {config_path}")
+        scores[label] = validate_probability(raw_score, name=f"min score for label {label!r}")
+
+    unknown_labels = sorted(set(scores) - known_labels)
+    if unknown_labels:
+        raise ValueError(
+            "Label min-score config contains labels absent from the active prompt/classes configs: "
+            f"{unknown_labels}"
+        )
+    return scores
+
+
+def parse_simple_score_yaml(path: Path) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or line == "{}":
+            continue
+        if ":" not in line:
+            raise ValueError(f"Expected 'label: score' in {path}:{line_number}, got {raw_line!r}")
+        raw_label, raw_score = line.split(":", 1)
+        label = strip_matching_quotes(raw_label.strip())
+        score = raw_score.strip()
+        if not score:
+            raise ValueError(f"Missing score for label {label!r} in {path}:{line_number}")
+        if label in mapping:
+            raise ValueError(f"Duplicate label {label!r} in {path}:{line_number}")
+        mapping[label] = score
+    return mapping
+
+
+def strip_matching_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] in {"'", '"'} and value[-1] == value[0]:
+        return value[1:-1]
+    return value
+
+
+def validate_probability(value: Any, *, name: str) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number in [0,1], got {value!r}") from exc
+    if not np.isfinite(score) or score < 0.0 or score > 1.0:
+        raise ValueError(f"{name} must be in [0,1], got {value!r}")
+    return score
 
 
 def patch_hf_checkpoint_download(model_builder_module: Any, *, checkpoint_path: Path, model_dir: Path) -> None:
@@ -822,6 +944,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sam3-root", default=None, help="Path to cloned SAM3 repo, e.g. /home/.../git_repo/sam3.")
     parser.add_argument("--sam3-model-path", default=None, help="Path to local facebook/sam3.1 model directory.")
     parser.add_argument("--min-score", type=float, default=0.70)
+    parser.add_argument(
+        "--label-min-scores",
+        default=None,
+        help=(
+            "Optional YAML/JSON mapping of label names to detection thresholds. "
+            "Labels not listed use --min-score."
+        ),
+    )
     parser.add_argument("--max-images", type=int, default=None, help="Optional smoke-test limit.")
     parser.add_argument("--max-prompts", type=int, default=None, help="Optional smoke-test prompt limit per image.")
     parser.add_argument("--recursive", action="store_true", help="Read images recursively and mirror the relative output tree.")
