@@ -291,33 +291,6 @@ def auto_label_vehicle_instances(
                 )
             )
 
-    orientation_only = []
-    for orientation_index, candidate in enumerate(orientation):
-        if orientation_index in matched_orientation:
-            continue
-        if any(mask_overlap_coefficient(candidate.mask, vehicle.mask) >= orientation_match_overlap for vehicle in generic):
-            continue
-        orientation_only.append(candidate)
-    backup_keep = deduplicate_mask_indices(
-        [item.mask for item in orientation_only],
-        [item.score for item in orientation_only],
-        iou_threshold=nms_iou,
-    )
-    for index in backup_keep:
-        candidate = orientation_only[index]
-        output.append(
-            AutoLabeledVehicle(
-                label=candidate.label,
-                mask=np.asarray(candidate.mask, dtype=bool),
-                vehicle_score=float(candidate.score),
-                vehicle_prompt=candidate.prompt,
-                vehicle_box=candidate.box,
-                orientation_score=float(candidate.score),
-                orientation_prompt=candidate.prompt,
-                orientation_overlap=1.0,
-                label_source="orientation_only_detection",
-            )
-        )
     return output
 
 

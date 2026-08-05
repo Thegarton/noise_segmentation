@@ -47,10 +47,14 @@ conda run -p /home/a60116606/miniconda3/envs/sam3 \
   --overwrite
 ```
 
-The model is loaded once and reused for every image. Generic prompts detect the
-full vehicle mask. Orientation prompts are matched to that mask and only choose
-the initial `front/rear/side` folder. Duplicate generic detections are removed
-with mask-IoU NMS. Vehicles without a reliable orientation match go to `side`.
+The model is loaded once and reused for every image. A positive whitelist of
+`passenger car`, `SUV`, `van`, `pickup truck`, `truck`, and `bus` prompts
+detects the full vehicle mask. The broad `vehicle` prompt is deliberately not
+used because it also selects bicycles and motorcycles. Orientation prompts are
+matched to a confirmed whitelist mask and only choose the initial
+`front/rear/side` folder; an orientation-only detection is rejected. Duplicate
+generic detections are removed with mask-IoU NMS. Vehicles without a reliable
+orientation match go to `side`.
 
 Prompts are configured in
 `configs/vehicle_dataset_prompts.yaml`. Default fisheye processing matches the
@@ -155,9 +159,9 @@ confusion matrix.
 ## Generate More Training Data With EfficientNet
 
 After the first classifier is trained, use it instead of SAM3 orientation
-prompts to bootstrap a larger dataset. SAM3 receives only generic vehicle
-prompts and produces full vehicle masks. EfficientNet independently assigns
-each masked crop to `front`, `rear`, or `side`:
+prompts to bootstrap a larger dataset. SAM3 receives only the four-or-more-wheel
+positive whitelist and produces full vehicle masks. EfficientNet independently
+assigns each masked crop to `front`, `rear`, or `side`:
 
 ```bash
 conda run -p /home/a60116606/miniconda3/envs/sam3 \
@@ -192,9 +196,12 @@ semantic class YAML:
 
 ```yaml
 vehicle:
-  - "vehicle"
-  - "car"
-  - "passenger vehicle"
+  - "passenger car"
+  - "sport utility vehicle"
+  - "van"
+  - "pickup truck"
+  - "truck"
+  - "bus"
 ```
 
 The active semantic taxonomy must contain `front_of_vehicle: 9` and

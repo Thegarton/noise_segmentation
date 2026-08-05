@@ -39,7 +39,14 @@ from vehicle_orientation.preprocessing import (  # noqa: E402
 from vehicle_orientation.sam3_adapter import Sam3VehicleDetector, VehicleDetection  # noqa: E402
 
 
-DEFAULT_VEHICLE_PROMPTS = ("vehicle", "car", "passenger vehicle")
+DEFAULT_VEHICLE_PROMPTS = (
+    "passenger car",
+    "sport utility vehicle",
+    "van",
+    "pickup truck",
+    "truck",
+    "bus",
+)
 CLASS_COLORS = {
     "front": np.asarray([40, 200, 80], dtype=np.uint8),
     "rear": np.asarray([230, 70, 70], dtype=np.uint8),

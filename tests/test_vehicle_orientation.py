@@ -183,6 +183,28 @@ def test_auto_label_uses_full_vehicle_mask_and_orientation_prompt_only_for_label
     assert len(vehicles) == 2
 
 
+def test_auto_label_rejects_orientation_detection_without_whitelisted_vehicle_mask():
+    builder = load_build_script()
+    motorcycle_like_mask = np.ones((5, 5), dtype=bool)
+
+    vehicles = builder.auto_label_vehicle_instances(
+        [
+            SimpleNamespace(
+                label="front",
+                prompt="front view of a vehicle",
+                score=0.95,
+                mask=motorcycle_like_mask,
+                box=None,
+            )
+        ],
+        min_mask_size=1,
+        nms_iou=0.8,
+        orientation_match_overlap=0.3,
+    )
+
+    assert vehicles == []
+
+
 def test_efficientnet_cpu_forward_smoke():
     pytest.importorskip("torchvision")
     import torch
@@ -359,7 +381,14 @@ def test_efficientnet_bootstrap_detects_only_generic_vehicles_and_builds_review_
             pass
 
         def detect(self, image_path, *, prompts):
-            assert tuple(prompts) == ("vehicle", "car", "passenger vehicle")
+            assert tuple(prompts) == (
+                "passenger car",
+                "sport utility vehicle",
+                "van",
+                "pickup truck",
+                "truck",
+                "bus",
+            )
             assert all("front" not in prompt and "rear" not in prompt and "side" not in prompt for prompt in prompts)
             mask = np.zeros((10, 12), dtype=bool)
             mask[1:9, 1:11] = True

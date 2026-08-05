@@ -73,12 +73,15 @@ The prompt config may contain a transient label which is intentionally absent fr
 
 ```yaml
 vehicle:
-  - "vehicle"
-  - "car"
-  - "passenger vehicle"
+  - "passenger car"
+  - "sport utility vehicle"
+  - "van"
+  - "pickup truck"
+  - "truck"
+  - "bus"
 ```
 
-The runner deduplicates these masks before one batched classifier call per image. Orientation probabilities, confidence, margin, and fallback reason are saved in `instances.npz`, `instances.json`, and frame metadata. Both `license_plate_and_taillights` and the older `license_plate&taillights` spelling remain priority labels and cannot be overwritten by the vehicle mask.
+The positive whitelist intentionally avoids the broad `vehicle` prompt because it also covers bicycles and motorcycles. The runner deduplicates the car/truck/bus masks before one batched classifier call per image. Orientation probabilities, confidence, margin, and fallback reason are saved in `instances.npz`, `instances.json`, and frame metadata. Both `license_plate_and_taillights` and the older `license_plate&taillights` spelling remain priority labels and cannot be overwritten by the vehicle mask.
 
 For video-context SAM3 runs, use `scripts/run_sam3_video_teacher.py`. The main environment does not import SAM3 directly; SAM3 should run through its own Conda environment.
 

@@ -1,5 +1,7 @@
 vehicle:
-  - "vehicle"
-  - "car"
-  - "passenger vehicle"
-
+  - "passenger car"
+  - "sport utility vehicle"
+  - "van"
+  - "pickup truck"
+  - "truck"
+  - "bus"
