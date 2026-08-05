@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train an EfficientNet-B0 front/rear/other classifier."""
+"""Train an EfficientNet-B0 front/rear/side classifier."""
 
 from __future__ import annotations
 
@@ -188,7 +188,7 @@ def main() -> None:
                 "crop_padding": crop_padding,
                 "imagenet_mean": list(IMAGENET_MEAN),
                 "imagenet_std": list(IMAGENET_STD),
-                "other_fallback": "front",
+                "side_fallback": "front",
             },
             indent=2,
         ),
@@ -223,7 +223,8 @@ class OrientationDataset:
                 from PIL import Image  # noqa: WPS433
 
                 record = self.records[index]
-                image = Image.open(self.dataset_root / record["masked_rgb"]).convert("RGB")
+                image_path = record.get("classifier_image", record["masked_rgb"])
+                image = Image.open(self.dataset_root / image_path).convert("RGB")
                 return self.transform(image), self.class_to_id[str(record["label"])]
 
         return _Dataset()
@@ -388,7 +389,7 @@ def _import_training_dependencies() -> tuple[Any, Any, Any, Any, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the vehicle front/rear/other classifier.")
+    parser = argparse.ArgumentParser(description="Train the vehicle front/rear/side classifier.")
     parser.add_argument("--manifest", required=True, help="Path to dataset manifest.jsonl.")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--epochs", type=int, default=30)

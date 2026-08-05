@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a front/rear/other vehicle crop dataset with one reused SAM3 model."""
+"""Create an automatically sorted front/rear/side vehicle review dataset."""
 
 from __future__ import annotations
 
@@ -9,8 +9,10 @@ import json
 import shutil
 import sys
 import time
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -22,9 +24,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from vehicle_orientation.dataset import (  # noqa: E402
     assign_stratified_splits,
-    collect_source_images,
-    limit_sources_balanced,
-    parse_folder_mappings,
+    collect_mixed_source_images,
     summarize_manifest,
     write_jsonl,
 )
@@ -34,10 +34,24 @@ from vehicle_orientation.preprocessing import (  # noqa: E402
     deduplicate_mask_indices,
     extract_mask_crop,
 )
-from vehicle_orientation.sam3_adapter import Sam3VehicleDetector  # noqa: E402
+from vehicle_orientation.sam3_adapter import Sam3VehicleDetector, VehicleDetection  # noqa: E402
 
 
-DEFAULT_PROMPTS = ("vehicle", "car", "passenger vehicle")
+DEFAULT_PROMPT_CONFIG = PROJECT_ROOT / "configs" / "vehicle_dataset_prompts.yaml"
+ORIENTATION_LABELS = ("front", "rear", "side")
+
+
+@dataclass(frozen=True)
+class AutoLabeledVehicle:
+    label: str
+    mask: np.ndarray
+    vehicle_score: float
+    vehicle_prompt: str
+    vehicle_box: np.ndarray | None
+    orientation_score: float | None
+    orientation_prompt: str | None
+    orientation_overlap: float
+    label_source: str
 
 
 def main() -> None:
@@ -45,15 +59,24 @@ def main() -> None:
     source_root = Path(args.source_root).expanduser().resolve()
     out_dir = Path(args.out_dir).expanduser().resolve()
     _prepare_output_dir(out_dir, overwrite=args.overwrite, source_root=source_root)
-
-    folder_mapping = parse_folder_mappings(args.folder_map)
-    source_records = collect_source_images(source_root, folder_mapping)
-    source_records = limit_sources_balanced(source_records, args.max_images)
-    prompts = tuple(prompt.strip() for prompt in (args.prompt or DEFAULT_PROMPTS) if prompt.strip())
-    if not prompts:
-        raise ValueError("At least one vehicle prompt is required")
+    for label in ORIENTATION_LABELS:
+        (out_dir / "review" / label).mkdir(parents=True, exist_ok=True)
     if args.min_mask_size <= 0:
         raise ValueError(f"--min-mask-size must be positive, got {args.min_mask_size}")
+
+    source_records = collect_mixed_source_images(source_root, recursive=not args.non_recursive)
+    if args.max_images is not None:
+        if args.max_images <= 0:
+            raise ValueError(f"--max-images must be positive, got {args.max_images}")
+        source_records = source_records[: args.max_images]
+    prompt_groups = load_prompt_groups(args.prompt_config)
+    if args.prompt:
+        prompt_groups["generic"] = [value.strip() for value in args.prompt if value.strip()]
+    labeled_prompts = [
+        (label, prompt)
+        for label in ("generic", *ORIENTATION_LABELS)
+        for prompt in prompt_groups[label]
+    ]
 
     fisheye_config = FisheyeConfig(
         output_width=args.output_width,
@@ -85,95 +108,96 @@ def main() -> None:
     for index, source in enumerate(source_records, start=1):
         started_at = time.perf_counter()
         source_path = Path(source["source_path"])
-        source_id = _source_id(source["label"], source["source_relative_path"])
-        prepared_path = out_dir / "prepared" / source["label"] / f"{source_id}.jpg"
+        source_id = _source_id(source["source_relative_path"])
+        prepared_path = out_dir / "prepared" / f"{source_id}.jpg"
         print(f"[{index:05d}/{len(source_records):05d}] {source_path}", file=sys.stderr, flush=True)
 
         image_bgr = _read_bgr(source_path)
         prepared_bgr = preprocessor.prepare_bgr(image_bgr)
         _write_bgr(prepared_path, prepared_bgr)
         prepared_rgb = np.ascontiguousarray(prepared_bgr[..., ::-1])
-
-        raw_detections = detector.detect(prepared_path, prompts=prompts)
-        valid_detections = [
-            item for item in raw_detections if int(np.count_nonzero(item.mask)) >= args.min_mask_size
-        ]
-        keep = deduplicate_mask_indices(
-            [item.mask for item in valid_detections],
-            [item.score for item in valid_detections],
-            iou_threshold=args.nms_iou,
+        raw_detections = detector.detect_labeled(prepared_path, labeled_prompts=labeled_prompts)
+        vehicles = auto_label_vehicle_instances(
+            raw_detections,
+            min_mask_size=args.min_mask_size,
+            nms_iou=args.nms_iou,
+            orientation_match_overlap=args.orientation_match_overlap,
         )
-        detections = [valid_detections[item_index] for item_index in keep]
-        for instance_index, detection in enumerate(detections):
-            crop = extract_mask_crop(
-                prepared_rgb,
-                detection.mask,
-                padding=args.crop_padding,
-            )
+
+        for instance_index, vehicle in enumerate(vehicles):
+            crop = extract_mask_crop(prepared_rgb, vehicle.mask, padding=args.crop_padding)
             sample_id = f"{source_id}_{instance_index:03d}"
-            sample_dir = out_dir / "samples" / source["label"] / sample_id
-            paths = _save_crop_outputs(sample_dir, crop)
+            sample_dir = out_dir / "samples" / sample_id
+            review_path = out_dir / "review" / vehicle.label / f"{sample_id}.png"
+            paths = _save_crop_outputs(sample_dir, crop, review_path=review_path)
             record = {
                 "sample_id": sample_id,
                 "source_id": source_id,
-                "label": source["label"],
+                "label": vehicle.label,
+                "initial_label": vehicle.label,
                 "source_path": str(source_path),
                 "source_relative_path": source["source_relative_path"],
                 "prepared_image": str(prepared_path.relative_to(out_dir)),
                 "rgb_crop": str(paths["rgb"].relative_to(out_dir)),
                 "mask": str(paths["mask"].relative_to(out_dir)),
                 "masked_rgb": str(paths["masked"].relative_to(out_dir)),
+                "classifier_image": str(paths["review"].relative_to(out_dir)),
                 "preview": str(paths["preview"].relative_to(out_dir)),
-                "sam3_prompt": detection.prompt,
-                "sam3_score": float(detection.score),
-                "sam3_box_xywh": None
-                if detection.box is None
-                else np.asarray(detection.box, dtype=np.float32).tolist(),
+                "vehicle_prompt": vehicle.vehicle_prompt,
+                "vehicle_score": float(vehicle.vehicle_score),
+                "vehicle_box_xywh": None
+                if vehicle.vehicle_box is None
+                else np.asarray(vehicle.vehicle_box, dtype=np.float32).tolist(),
+                "orientation_prompt": vehicle.orientation_prompt,
+                "orientation_score": vehicle.orientation_score,
+                "orientation_overlap": float(vehicle.orientation_overlap),
+                "auto_label_source": vehicle.label_source,
+                "label_source": vehicle.label_source,
                 "crop_bbox_xyxy": list(crop.bbox_xyxy),
                 "mask_pixels": int(np.count_nonzero(crop.mask)),
                 "metadata": str((sample_dir / "metadata.json").relative_to(out_dir)),
             }
             samples.append(record)
 
+        label_counts = Counter(item.label for item in vehicles)
         source_results.append(
             {
                 "source_id": source_id,
-                "label": source["label"],
                 "source_path": str(source_path),
                 "source_relative_path": source["source_relative_path"],
                 "prepared_image": str(prepared_path.relative_to(out_dir)),
                 "raw_detections": len(raw_detections),
-                "valid_detections": len(valid_detections),
-                "kept_detections": len(detections),
+                "kept_vehicles": len(vehicles),
+                "auto_label_counts": dict(sorted(label_counts.items())),
                 "processing_time_seconds": round(time.perf_counter() - started_at, 6),
             }
         )
 
     if not samples:
-        raise RuntimeError("SAM3 produced no vehicle crops; lower --min-score/--min-mask-size or inspect prompts")
+        raise RuntimeError("SAM3 produced no vehicle crops; lower thresholds or inspect the prompt config")
     samples = assign_stratified_splits(
         samples,
         seed=args.seed,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
     )
-    for record in samples:
-        metadata_path = out_dir / record["metadata"]
-        metadata_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_sample_metadata(out_dir, samples)
 
     manifest_path = out_dir / "manifest.jsonl"
     write_jsonl(manifest_path, samples)
     manifest = {
-        "version": 1,
+        "version": 2,
+        "mode": "mixed_images_auto_orientation",
         "source_root": str(source_root),
         "out_dir": str(out_dir),
-        "folder_mapping": folder_mapping,
-        "prompts": list(prompts),
+        "prompt_config": str(Path(args.prompt_config).expanduser().resolve()),
+        "prompt_groups": prompt_groups,
         "sam3_root": str(Path(args.sam3_root).expanduser().resolve()),
         "sam3_model_path": str(Path(args.sam3_model_path).expanduser().resolve()),
         "min_score": float(args.min_score),
         "min_mask_size": int(args.min_mask_size),
         "nms_iou": float(args.nms_iou),
+        "orientation_match_overlap": float(args.orientation_match_overlap),
         "crop_padding": float(args.crop_padding),
         "fisheye": fisheye_config.to_dict(),
         "remap_cache_entries": preprocessor.cache_size,
@@ -182,6 +206,11 @@ def main() -> None:
             "val_ratio": float(args.val_ratio),
             "test_ratio": float(1.0 - args.train_ratio - args.val_ratio),
             "seed": int(args.seed),
+            "grouped_by": "source_id",
+        },
+        "manual_review": {
+            "folders": ["review/front", "review/rear", "review/side"],
+            "instructions": "Move PNG files between review folders, then run reindex_dataset.py.",
         },
         "summary": summarize_manifest(samples),
         "sources": source_results,
@@ -190,6 +219,151 @@ def main() -> None:
     manifest_json = out_dir / "dataset_manifest.json"
     manifest_json.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"manifest": str(manifest_json), **manifest["summary"]}, ensure_ascii=False, indent=2))
+
+
+def auto_label_vehicle_instances(
+    detections: Sequence[VehicleDetection],
+    *,
+    min_mask_size: int,
+    nms_iou: float,
+    orientation_match_overlap: float,
+) -> list[AutoLabeledVehicle]:
+    if not 0.0 <= orientation_match_overlap <= 1.0:
+        raise ValueError(f"orientation_match_overlap must be in [0,1], got {orientation_match_overlap}")
+    valid = [
+        item
+        for item in detections
+        if item.label in {"generic", *ORIENTATION_LABELS}
+        and int(np.count_nonzero(np.asarray(item.mask, dtype=bool))) >= min_mask_size
+    ]
+    generic = [item for item in valid if item.label == "generic"]
+    orientation = [item for item in valid if item.label in ORIENTATION_LABELS]
+    generic_keep = deduplicate_mask_indices(
+        [item.mask for item in generic],
+        [item.score for item in generic],
+        iou_threshold=nms_iou,
+    )
+    generic = [generic[index] for index in generic_keep]
+
+    output: list[AutoLabeledVehicle] = []
+    matched_orientation: set[int] = set()
+    for vehicle in generic:
+        candidates = []
+        for orientation_index, candidate in enumerate(orientation):
+            if orientation_index in matched_orientation:
+                continue
+            overlap = mask_overlap_coefficient(vehicle.mask, candidate.mask)
+            if overlap < orientation_match_overlap:
+                continue
+            weighted_score = float(candidate.score) * (0.5 + 0.5 * overlap)
+            candidates.append((weighted_score, float(candidate.score), overlap, orientation_index, candidate))
+        if candidates:
+            _, _, overlap, orientation_index, best = max(
+                candidates,
+                key=lambda item: (item[0], item[1], item[2], -item[3]),
+            )
+            matched_orientation.add(orientation_index)
+            output.append(
+                AutoLabeledVehicle(
+                    label=best.label,
+                    mask=np.asarray(vehicle.mask, dtype=bool),
+                    vehicle_score=float(vehicle.score),
+                    vehicle_prompt=vehicle.prompt,
+                    vehicle_box=vehicle.box,
+                    orientation_score=float(best.score),
+                    orientation_prompt=best.prompt,
+                    orientation_overlap=float(overlap),
+                    label_source="matched_orientation_prompt",
+                )
+            )
+        else:
+            output.append(
+                AutoLabeledVehicle(
+                    label="side",
+                    mask=np.asarray(vehicle.mask, dtype=bool),
+                    vehicle_score=float(vehicle.score),
+                    vehicle_prompt=vehicle.prompt,
+                    vehicle_box=vehicle.box,
+                    orientation_score=None,
+                    orientation_prompt=None,
+                    orientation_overlap=0.0,
+                    label_source="unmatched_generic_fallback_side",
+                )
+            )
+
+    orientation_only = []
+    for orientation_index, candidate in enumerate(orientation):
+        if orientation_index in matched_orientation:
+            continue
+        if any(mask_overlap_coefficient(candidate.mask, vehicle.mask) >= orientation_match_overlap for vehicle in generic):
+            continue
+        orientation_only.append(candidate)
+    backup_keep = deduplicate_mask_indices(
+        [item.mask for item in orientation_only],
+        [item.score for item in orientation_only],
+        iou_threshold=nms_iou,
+    )
+    for index in backup_keep:
+        candidate = orientation_only[index]
+        output.append(
+            AutoLabeledVehicle(
+                label=candidate.label,
+                mask=np.asarray(candidate.mask, dtype=bool),
+                vehicle_score=float(candidate.score),
+                vehicle_prompt=candidate.prompt,
+                vehicle_box=candidate.box,
+                orientation_score=float(candidate.score),
+                orientation_prompt=candidate.prompt,
+                orientation_overlap=1.0,
+                label_source="orientation_only_detection",
+            )
+        )
+    return output
+
+
+def mask_overlap_coefficient(left: np.ndarray, right: np.ndarray) -> float:
+    left_mask = np.asarray(left, dtype=bool)
+    right_mask = np.asarray(right, dtype=bool)
+    if left_mask.shape != right_mask.shape:
+        raise ValueError(f"Mask shape mismatch: {left_mask.shape} vs {right_mask.shape}")
+    intersection = int(np.count_nonzero(left_mask & right_mask))
+    denominator = min(int(np.count_nonzero(left_mask)), int(np.count_nonzero(right_mask)))
+    return float(intersection) / float(denominator) if denominator > 0 else 0.0
+
+
+def load_prompt_groups(path: str | Path) -> dict[str, list[str]]:
+    config_path = Path(path).expanduser().resolve()
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Prompt config does not exist: {config_path}")
+    groups: dict[str, list[str]] = {}
+    current: str | None = None
+    for line_number, raw_line in enumerate(config_path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0 and stripped.endswith(":"):
+            current = stripped[:-1].strip()
+            groups.setdefault(current, [])
+        elif indent >= 2 and stripped.startswith("- ") and current is not None:
+            value = stripped[2:].strip()
+            if len(value) >= 2 and value[0] in {"'", '"'} and value[-1] == value[0]:
+                value = value[1:-1]
+            if value:
+                groups[current].append(value)
+        else:
+            raise ValueError(f"Unsupported prompt YAML syntax at {config_path}:{line_number}")
+    missing = [label for label in ("generic", *ORIENTATION_LABELS) if not groups.get(label)]
+    if missing:
+        raise ValueError(f"Prompt config must contain non-empty generic/front/rear/side groups; missing {missing}")
+    return {label: groups[label] for label in ("generic", *ORIENTATION_LABELS)}
+
+
+def write_sample_metadata(out_dir: Path, samples: list[dict[str, Any]]) -> None:
+    for record in samples:
+        metadata_path = out_dir / record["metadata"]
+        metadata_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _prepare_output_dir(out_dir: Path, *, overwrite: bool, source_root: Path) -> None:
@@ -202,11 +376,11 @@ def _prepare_output_dir(out_dir: Path, *, overwrite: bool, source_root: Path) ->
     out_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _source_id(label: str, relative_path: str) -> str:
-    digest = hashlib.sha1(f"{label}:{relative_path}".encode("utf-8")).hexdigest()[:12]
+def _source_id(relative_path: str) -> str:
+    digest = hashlib.sha1(relative_path.encode("utf-8")).hexdigest()[:12]
     stem = Path(relative_path).stem
     safe_stem = "".join(character if character.isalnum() or character in "-_" else "_" for character in stem)
-    return f"{label}_{safe_stem}_{digest}"
+    return f"{safe_stem}_{digest}"
 
 
 def _read_bgr(path: Path) -> np.ndarray:
@@ -221,17 +395,17 @@ def _read_bgr(path: Path) -> np.ndarray:
 def _write_bgr(path: Path, image: np.ndarray) -> None:
     cv2 = _import_cv2()
     path.parent.mkdir(parents=True, exist_ok=True)
-    extension = path.suffix or ".jpg"
-    ok, encoded = cv2.imencode(extension, np.asarray(image, dtype=np.uint8))
+    ok, encoded = cv2.imencode(path.suffix or ".jpg", np.asarray(image, dtype=np.uint8))
     if not ok:
         raise OSError(f"OpenCV could not encode image for {path}")
     encoded.tofile(path)
 
 
-def _save_crop_outputs(sample_dir: Path, crop: Any) -> dict[str, Path]:
+def _save_crop_outputs(sample_dir: Path, crop: Any, *, review_path: Path) -> dict[str, Path]:
     from PIL import Image  # noqa: WPS433
 
     sample_dir.mkdir(parents=True, exist_ok=True)
+    review_path.parent.mkdir(parents=True, exist_ok=True)
     rgb_path = sample_dir / "rgb.png"
     mask_path = sample_dir / "mask.png"
     masked_path = sample_dir / "masked_rgb.png"
@@ -239,15 +413,14 @@ def _save_crop_outputs(sample_dir: Path, crop: Any) -> dict[str, Path]:
     Image.fromarray(crop.rgb, mode="RGB").save(rgb_path)
     Image.fromarray(crop.mask.astype(np.uint8) * 255, mode="L").save(mask_path)
     Image.fromarray(crop.masked_rgb, mode="RGB").save(masked_path)
+    Image.fromarray(crop.masked_rgb, mode="RGB").save(review_path)
     overlay = crop.rgb.copy()
     color = np.asarray([50, 220, 90], dtype=np.float32)
-    overlay[crop.mask] = (
-        overlay[crop.mask].astype(np.float32) * 0.55 + color * 0.45
-    ).astype(np.uint8)
+    overlay[crop.mask] = (overlay[crop.mask].astype(np.float32) * 0.55 + color * 0.45).astype(np.uint8)
     separator = np.full((crop.rgb.shape[0], 8, 3), 255, dtype=np.uint8)
     preview = np.concatenate([crop.rgb, separator, crop.masked_rgb, separator, overlay], axis=1)
     Image.fromarray(preview, mode="RGB").save(preview_path, quality=95)
-    return {"rgb": rgb_path, "mask": mask_path, "masked": masked_path, "preview": preview_path}
+    return {"rgb": rgb_path, "mask": mask_path, "masked": masked_path, "review": review_path, "preview": preview_path}
 
 
 def _import_cv2() -> Any:
@@ -259,24 +432,22 @@ def _import_cv2() -> Any:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build a SAM3 mask-based front/rear/other vehicle dataset.")
-    parser.add_argument("--source-root", required=True, help="Root containing front, rear, and other image folders.")
-    parser.add_argument("--out-dir", required=True)
-    parser.add_argument(
-        "--folder-map",
-        action="append",
-        default=[],
-        metavar="LABEL=PATH",
-        help="Override a class folder, for example rear=backlights_and_licence_plate.",
+    parser = argparse.ArgumentParser(
+        description="Detect cars in one mixed image folder and auto-sort masked crops into front/rear/side review folders."
     )
+    parser.add_argument("--source-root", required=True, help="One directory containing mixed camera images.")
+    parser.add_argument("--out-dir", required=True)
     parser.add_argument("--sam3-root", required=True)
     parser.add_argument("--sam3-model-path", required=True)
-    parser.add_argument("--prompt", action="append", default=None, help="Vehicle prompt; repeat for multiple prompts.")
+    parser.add_argument("--prompt-config", default=str(DEFAULT_PROMPT_CONFIG))
+    parser.add_argument("--prompt", action="append", default=None, help="Override generic vehicle prompts; repeat as needed.")
     parser.add_argument("--min-score", type=float, default=0.45)
     parser.add_argument("--min-mask-size", type=int, default=900)
     parser.add_argument("--nms-iou", type=float, default=0.80)
+    parser.add_argument("--orientation-match-overlap", type=float, default=0.30)
     parser.add_argument("--crop-padding", type=float, default=0.12)
     parser.add_argument("--max-images", type=int, default=None)
+    parser.add_argument("--non-recursive", action="store_true")
     parser.add_argument("--use-fa3", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--seed", type=int, default=42)

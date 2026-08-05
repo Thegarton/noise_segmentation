@@ -19,6 +19,7 @@ BOX_KEYS = ("boxes_xyxy", "boxes", "pred_boxes", "out_boxes_xywh")
 
 @dataclass(frozen=True)
 class VehicleDetection:
+    label: str
     prompt: str
     score: float
     mask: np.ndarray
@@ -43,6 +44,17 @@ class Sam3VehicleDetector:
         self.predictor = _build_predictor(self.model_dir, use_fa3=use_fa3, min_score=self.min_score)
 
     def detect(self, image_path: str | Path, *, prompts: Sequence[str]) -> list[VehicleDetection]:
+        return self.detect_labeled(
+            image_path,
+            labeled_prompts=[("vehicle", str(prompt)) for prompt in prompts],
+        )
+
+    def detect_labeled(
+        self,
+        image_path: str | Path,
+        *,
+        labeled_prompts: Sequence[tuple[str, str]],
+    ) -> list[VehicleDetection]:
         from PIL import Image  # noqa: WPS433
 
         path = Path(image_path).expanduser().resolve()
@@ -50,7 +62,7 @@ class Sam3VehicleDetector:
         session_id = _start_session(self.predictor, path)
         detections: list[VehicleDetection] = []
         try:
-            for prompt in prompts:
+            for label, prompt in labeled_prompts:
                 _reset_session(self.predictor, session_id)
                 _set_threshold(self.predictor, self.min_score)
                 response = self.predictor.handle_request(
@@ -69,6 +81,7 @@ class Sam3VehicleDetector:
                         continue
                     detections.append(
                         VehicleDetection(
+                            label=str(label),
                             prompt=str(prompt),
                             score=score,
                             mask=mask,
@@ -177,4 +190,3 @@ def _validate_probability(value: float) -> float:
     if not np.isfinite(score) or not 0.0 <= score <= 1.0:
         raise ValueError(f"min_score must be in [0,1], got {value}")
     return score
-

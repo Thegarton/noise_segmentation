@@ -67,7 +67,7 @@ Label names must exactly match the top-level keys in the active prompt config. P
 
 ### Vehicle front/rear classifier
 
-The standalone [`vehicle_orientation`](vehicle_orientation/README.md) project builds masked car crops with SAM3, trains an ImageNet-pretrained EfficientNet-B0 on `front/rear/other`, and optionally routes a generic `vehicle` prompt to `front_of_vehicle: 9` or `rear_of_vehicle: 10` inside the folder runner. Install it in the SAM3 environment and pass `--vehicle-orientation-checkpoint`; without that flag, the existing SAM3 behavior is unchanged.
+The standalone [`vehicle_orientation`](vehicle_orientation/README.md) project accepts one mixed camera-image folder, uses SAM3 to cut out every car and roughly sort crops into `review/front`, `review/rear`, and `review/side`, then rebuilds labels after manual file moves. It trains an ImageNet-pretrained EfficientNet-B0 on the reviewed `front/rear/side` dataset and optionally routes a generic `vehicle` prompt to `front_of_vehicle: 9` or `rear_of_vehicle: 10` inside the folder runner. Install it in the SAM3 environment and pass `--vehicle-orientation-checkpoint`; without that flag, the existing SAM3 behavior is unchanged.
 
 The prompt config may contain a transient label which is intentionally absent from `classes.yaml`:
 

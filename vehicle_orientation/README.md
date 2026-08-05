@@ -1,48 +1,44 @@
 # HL320 Vehicle Orientation
 
-This standalone project builds a SAM3 mask-based vehicle dataset, trains an
-EfficientNet-B0 classifier with `front`, `rear`, and `other` classes, and can
-route generic SAM3 `vehicle` instances to the stable point-wise taxonomy.
+This standalone project turns one mixed folder of camera images into a reviewed
+vehicle orientation dataset. SAM3.1 detects every visible vehicle, makes a
+full-mask crop, and roughly sorts the crops into `front`, `rear`, and `side`.
+After manual folder correction, EfficientNet-B0 is trained on the corrected
+labels and can help the main SAM3 pipeline distinguish vehicle fronts and rears.
 
 ## Install
 
-Install it inside the environment that already runs SAM3:
+Install the project inside the environment that already runs SAM3:
 
 ```bash
 conda run -p /home/a60116606/miniconda3/envs/sam3 \
   pip install -e /home/a60116606/git_repo/noise_seg/pipeline_v0/vehicle_orientation
 ```
 
-The project uses the local SAM3 checkout and local `sam3.1_multiplex.pt`; it
-does not download SAM3 weights.
+The local SAM3 checkout and local `sam3.1_multiplex.pt` are used. The builder
+does not download model weights.
 
-## Source Layout
+## Input
 
-The source root normally contains three folders:
+`--source-root` is one directory of mixed images. A frame may contain many cars
+at different orientations. It must not be pre-sorted into class folders:
 
 ```text
-vehicle_orientation_sources/
-  front/
-  rear/
-  other/
+vehicle_images/
+  000000.jpg
+  000001.jpg
+  000002.jpg
 ```
 
-Every vehicle detected in an image inherits the label of its folder. Use
-`--folder-map` when an existing folder has another name, for example
-`rear=backlights_and_licence_plate`.
+Subdirectories are scanned recursively by default. Use `--non-recursive` to
+read only files directly inside `--source-root`.
 
-## Build Dataset
-
-The builder loads SAM3.1 Multiplex once, then reuses it for every image and all
-three prompts. Every input image is color-corrected, circularly masked, and
-defished before detection. Source names are recorded in metadata and are not
-drawn into classifier images.
+## Build And Auto-Sort
 
 ```bash
 conda run -p /home/a60116606/miniconda3/envs/sam3 \
   python vehicle_orientation/scripts/build_dataset.py \
-  --source-root /data/new_HL320/classes \
-  --folder-map rear=backlights_and_licence_plate \
+  --source-root /data/new_HL320/camera_images \
   --out-dir ./output/vehicle_orientation_dataset \
   --sam3-root /home/a60116606/git_repo/sam3 \
   --sam3-model-path /home/a60116606/git_repo/sam3/sam3.1 \
@@ -51,29 +47,62 @@ conda run -p /home/a60116606/miniconda3/envs/sam3 \
   --overwrite
 ```
 
-Default fisheye parameters match the current HL320 server preprocessing:
-`3840x3060`, equal-area source model, cylindrical output, `fov=190`,
-`pfov=140`, center `(960,750)`, radius `1068`, and Lanczos interpolation.
-All parameters have CLI overrides.
+The model is loaded once and reused for every image. Generic prompts detect the
+full vehicle mask. Orientation prompts are matched to that mask and only choose
+the initial `front/rear/side` folder. Duplicate generic detections are removed
+with mask-IoU NMS. Vehicles without a reliable orientation match go to `side`.
+
+Prompts are configured in
+`configs/vehicle_dataset_prompts.yaml`. Default fisheye processing matches the
+current HL320 setup: `3840x3060`, equal-area source model, cylindrical output,
+`fov=190`, `pfov=140`, center `(960,750)`, radius `1068`, and Lanczos
+interpolation. All camera parameters have CLI overrides.
 
 Important outputs:
 
 ```text
 <out-dir>/
-  prepared/<class>/*.jpg
-  samples/<class>/<sample-id>/rgb.png
-  samples/<class>/<sample-id>/mask.png
-  samples/<class>/<sample-id>/masked_rgb.png
-  samples/<class>/<sample-id>/preview.jpg
+  prepared/*.jpg
+  samples/<sample-id>/rgb.png
+  samples/<sample-id>/mask.png
+  samples/<sample-id>/masked_rgb.png
+  samples/<sample-id>/preview.jpg
+  review/front/*.png
+  review/rear/*.png
+  review/side/*.png
   manifest.jsonl
   dataset_manifest.json
 ```
 
-Duplicate detections from `vehicle`, `car`, and `passenger vehicle` are merged
-with mask-IoU NMS. Splits are stratified `70/15/15`, and all crops from one
-source image remain in the same split.
+## Manual Review
+
+Open the three `review` folders and move incorrectly sorted PNG files to the
+correct folder. Do not rename or delete them. The stable assets and SAM3
+metadata remain under `samples/<sample-id>`.
+
+Check the result without writing changes:
+
+```bash
+python vehicle_orientation/scripts/reindex_dataset.py \
+  --dataset-dir ./output/vehicle_orientation_dataset \
+  --dry-run
+```
+
+Then apply the reviewed folders to `manifest.jsonl` and regenerate the split:
+
+```bash
+python vehicle_orientation/scripts/reindex_dataset.py \
+  --dataset-dir ./output/vehicle_orientation_dataset \
+  --seed 42
+```
+
+The split is group-aware `70/15/15`: all vehicle crops from one original frame
+remain in the same train, validation, or test split even when that frame
+contains both front and rear views.
 
 ## Train
+
+Run training only after `reindex_dataset.py`:
 
 ```bash
 conda run -p /home/a60116606/miniconda3/envs/sam3 \
@@ -87,15 +116,15 @@ conda run -p /home/a60116606/miniconda3/envs/sam3 \
   --overwrite
 ```
 
-The classifier head is trained alone for three epochs, then the complete
-ImageNet-pretrained EfficientNet-B0 is fine-tuned. The best checkpoint is
-selected by validation macro-F1. Metrics include per-class precision, recall,
-F1, and the confusion matrix.
+The classifier head is trained for three epochs, then the full ImageNet-
+pretrained EfficientNet-B0 is fine-tuned. `model_best.pth` is selected by
+validation macro-F1. Metrics include per-class precision, recall, F1, and a
+confusion matrix.
 
 ## Use With SAM3
 
-Add a transient entry to the active prompt config. It does not need an id in
-`classes.yaml`:
+The production prompt config may contain a transient label absent from the
+semantic class YAML:
 
 ```yaml
 vehicle:
@@ -124,12 +153,8 @@ PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
   --validate
 ```
 
-`rear` becomes class `10`; `front` becomes class `9`. By the selected project
-policy, `other`, low-confidence, and low-margin predictions also fall back to
-`front_of_vehicle` while retaining the fallback reason and all three
-probabilities in NPZ/JSON metadata. Without the checkpoint flag, the original
-SAM3 runner behavior is unchanged.
-
-For the complete camera taxonomy, add the same top-level `vehicle` entry to
-your full prompt YAML and keep using the production classes YAML. The included
-configs are sufficient for a vehicle-only smoke run.
+`rear` becomes class `10`; `front` becomes class `9`. By the current semantic
+policy, `side`, low-confidence, and low-margin predictions fall back to
+`front_of_vehicle`, while their original decision and probabilities remain in
+NPZ/JSON metadata. Without the checkpoint flag, the existing SAM3 behavior is
+unchanged.

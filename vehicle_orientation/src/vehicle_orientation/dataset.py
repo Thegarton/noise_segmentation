@@ -8,61 +8,28 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
+import numpy as np
 
-CLASS_NAMES = ("front", "rear", "other")
+
+CLASS_NAMES = ("front", "rear", "side")
 IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".webp"})
 
 
-def parse_folder_mappings(values: Iterable[str]) -> dict[str, str]:
-    mapping = {name: name for name in CLASS_NAMES}
-    for value in values:
-        if "=" not in value:
-            raise ValueError(f"Folder mapping must be LABEL=RELATIVE_PATH, got {value!r}")
-        label, relative = (token.strip() for token in value.split("=", 1))
-        if label not in CLASS_NAMES:
-            raise ValueError(f"Unknown orientation label {label!r}; expected one of {CLASS_NAMES}")
-        if not relative:
-            raise ValueError(f"Folder mapping for {label!r} has an empty path")
-        mapping[label] = relative
-    return mapping
-
-
-def collect_source_images(source_root: Path, folder_mapping: dict[str, str]) -> list[dict[str, str]]:
+def collect_mixed_source_images(source_root: Path, *, recursive: bool = True) -> list[dict[str, str]]:
     root = source_root.expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"Source root does not exist: {root}")
-    records: list[dict[str, str]] = []
-    for label in CLASS_NAMES:
-        class_dir = (root / folder_mapping[label]).resolve()
-        if not class_dir.is_dir():
-            raise FileNotFoundError(f"Missing source folder for {label!r}: {class_dir}")
-        paths = sorted(path for path in class_dir.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
-        if not paths:
-            raise ValueError(f"Source folder for {label!r} contains no supported images: {class_dir}")
-        for path in paths:
-            records.append(
-                {
-                    "label": label,
-                    "source_path": str(path),
-                    "source_relative_path": str(path.relative_to(root)),
-                }
-            )
-    return records
-
-
-def limit_sources_balanced(records: list[dict[str, str]], max_images: int | None) -> list[dict[str, str]]:
-    if max_images is None:
-        return records
-    if max_images <= 0:
-        raise ValueError(f"max_images must be positive, got {max_images}")
-    queues = {label: [record for record in records if record["label"] == label] for label in CLASS_NAMES}
-    selected: list[dict[str, str]] = []
-    while len(selected) < max_images and any(queues.values()):
-        for label in CLASS_NAMES:
-            if queues[label] and len(selected) < max_images:
-                selected.append(queues[label].pop(0))
-    return selected
-
+    iterator = root.rglob("*") if recursive else root.iterdir()
+    paths = sorted(path for path in iterator if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
+    if not paths:
+        raise ValueError(f"Source folder contains no supported images: {root}")
+    return [
+        {
+            "source_path": str(path),
+            "source_relative_path": str(path.relative_to(root)),
+        }
+        for path in paths
+    ]
 
 def assign_stratified_splits(
     samples: list[dict[str, Any]],
@@ -73,30 +40,20 @@ def assign_stratified_splits(
 ) -> list[dict[str, Any]]:
     if not 0.0 < train_ratio < 1.0 or not 0.0 <= val_ratio < 1.0 or train_ratio + val_ratio >= 1.0:
         raise ValueError("Split ratios must satisfy train>0, val>=0, train+val<1")
-    source_labels: dict[str, str] = {}
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for sample in samples:
         source_id = str(sample["source_id"])
         label = str(sample["label"])
-        previous = source_labels.setdefault(source_id, label)
-        if previous != label:
-            raise ValueError(f"Source {source_id!r} has conflicting labels: {previous!r} and {label!r}")
+        if label not in CLASS_NAMES:
+            raise ValueError(f"Unknown orientation label {label!r}; expected one of {CLASS_NAMES}")
+        groups[source_id].append(sample)
 
-    by_label: dict[str, list[str]] = defaultdict(list)
-    for source_id, label in source_labels.items():
-        by_label[label].append(source_id)
-    source_to_split: dict[str, str] = {}
-    for label in CLASS_NAMES:
-        source_ids = sorted(by_label.get(label, []))
-        random.Random(f"{seed}:{label}").shuffle(source_ids)
-        train_count, val_count = _split_counts(len(source_ids), train_ratio=train_ratio, val_ratio=val_ratio)
-        for index, source_id in enumerate(source_ids):
-            if index < train_count:
-                split = "train"
-            elif index < train_count + val_count:
-                split = "val"
-            else:
-                split = "test"
-            source_to_split[source_id] = split
+    source_to_split = _assign_group_splits(
+        groups,
+        seed=seed,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+    )
 
     result = []
     for sample in samples:
@@ -155,3 +112,64 @@ def _split_counts(total: int, *, train_ratio: float, val_ratio: float) -> tuple[
             test_count -= 1
     return train_count, val_count
 
+
+def _assign_group_splits(
+    groups: dict[str, list[dict[str, Any]]],
+    *,
+    seed: int,
+    train_ratio: float,
+    val_ratio: float,
+) -> dict[str, str]:
+    split_names = ("train", "val", "test")
+    ratios = np.asarray([train_ratio, val_ratio, 1.0 - train_ratio - val_ratio], dtype=np.float64)
+    class_to_index = {name: index for index, name in enumerate(CLASS_NAMES)}
+    group_vectors: dict[str, np.ndarray] = {}
+    for source_id, records in groups.items():
+        vector = np.zeros((len(CLASS_NAMES),), dtype=np.float64)
+        for record in records:
+            vector[class_to_index[str(record["label"])]] += 1.0
+        group_vectors[source_id] = vector
+
+    total_vector = sum(group_vectors.values(), start=np.zeros((len(CLASS_NAMES),), dtype=np.float64))
+    target_vectors = ratios[:, None] * total_vector[None, :]
+    target_totals = ratios * float(total_vector.sum())
+    train_groups, val_groups = _split_counts(len(groups), train_ratio=train_ratio, val_ratio=val_ratio)
+    group_quotas = np.asarray([train_groups, val_groups, len(groups) - train_groups - val_groups], dtype=np.int64)
+
+    randomizer = random.Random(seed)
+    tie_breakers = {source_id: randomizer.random() for source_id in sorted(groups)}
+    rarity = 1.0 / np.maximum(total_vector, 1.0)
+    ordered_sources = sorted(
+        groups,
+        key=lambda source_id: (
+            -float(np.sum(group_vectors[source_id] * rarity)),
+            -float(np.sum(group_vectors[source_id])),
+            tie_breakers[source_id],
+            source_id,
+        ),
+    )
+
+    current_vectors = np.zeros_like(target_vectors)
+    current_totals = np.zeros((len(split_names),), dtype=np.float64)
+    current_groups = np.zeros((len(split_names),), dtype=np.int64)
+    assignments: dict[str, str] = {}
+    for source_id in ordered_sources:
+        vector = group_vectors[source_id]
+        candidates = [index for index in range(len(split_names)) if current_groups[index] < group_quotas[index]]
+        if not candidates:
+            raise RuntimeError("Internal split error: all group quotas are full")
+        scored_candidates = []
+        for split_index in candidates:
+            proposed_vectors = current_vectors.copy()
+            proposed_totals = current_totals.copy()
+            proposed_vectors[split_index] += vector
+            proposed_totals[split_index] += float(vector.sum())
+            class_cost = np.sum((proposed_vectors - target_vectors) ** 2 / (target_vectors + 1.0))
+            total_cost = np.sum((proposed_totals - target_totals) ** 2 / (target_totals + 1.0))
+            scored_candidates.append((float(class_cost + 0.25 * total_cost), split_index))
+        _, chosen = min(scored_candidates, key=lambda item: (item[0], item[1]))
+        current_vectors[chosen] += vector
+        current_totals[chosen] += float(vector.sum())
+        current_groups[chosen] += 1
+        assignments[source_id] = split_names[chosen]
+    return assignments

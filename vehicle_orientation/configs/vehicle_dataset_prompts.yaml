@@ -1,0 +1,16 @@
+generic:
+  - "vehicle"
+  - "car"
+  - "passenger vehicle"
+front:
+  - "front of a vehicle"
+  - "front view of a car"
+  - "vehicle facing the camera"
+rear:
+  - "rear of a vehicle"
+  - "back of a car"
+  - "vehicle seen from behind"
+side:
+  - "side of a vehicle"
+  - "side view of a car"
+  - "vehicle viewed from the side"

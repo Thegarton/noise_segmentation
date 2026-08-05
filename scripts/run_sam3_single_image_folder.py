@@ -523,7 +523,7 @@ def apply_vehicle_orientation(
         target_label, target_id = class_mapping[semantic_key]
         probabilities = tuple(float(value) for value in decision.probabilities)
         if len(probabilities) != 3:
-            raise ValueError(f"Orientation probabilities must contain front/rear/other, got {probabilities}")
+            raise ValueError(f"Orientation probabilities must contain front/rear/side, got {probabilities}")
         replacements[index] = replace(
             instances[index],
             label=target_label,

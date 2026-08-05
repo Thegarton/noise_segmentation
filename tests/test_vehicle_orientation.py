@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from PIL import Image
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -17,8 +18,8 @@ if str(PACKAGE_SRC) not in sys.path:
 
 from vehicle_orientation.dataset import (  # noqa: E402
     assign_stratified_splits,
-    collect_source_images,
-    parse_folder_mappings,
+    collect_mixed_source_images,
+    load_jsonl,
 )
 from vehicle_orientation.model import decide_orientation  # noqa: E402
 from vehicle_orientation.preprocessing import (  # noqa: E402
@@ -59,21 +60,20 @@ def test_mask_nms_keeps_highest_score_and_distinct_instance():
     assert keep == [0, 2]
 
 
-def test_stratified_split_never_separates_crops_from_one_image():
+def test_group_aware_split_keeps_mixed_cars_from_one_frame_together():
     samples = []
-    for label in ("front", "rear", "other"):
-        for source_index in range(10):
-            for crop_index in range(2):
-                samples.append(
-                    {
-                        "sample_id": f"{label}-{source_index}-{crop_index}",
-                        "source_id": f"{label}-{source_index}",
-                        "label": label,
-                    }
-                )
+    for source_index in range(10):
+        for crop_index, label in enumerate(("front", "rear", "side")):
+            samples.append(
+                {
+                    "sample_id": f"frame-{source_index}-{crop_index}",
+                    "source_id": f"frame-{source_index}",
+                    "label": label,
+                }
+            )
 
     split = assign_stratified_splits(samples, seed=42)
-    source_splits = {}
+    source_splits: dict[str, set[str]] = {}
     for item in split:
         source_splits.setdefault(item["source_id"], set()).add(item["split"])
 
@@ -82,27 +82,31 @@ def test_stratified_split_never_separates_crops_from_one_image():
     assert assign_stratified_splits(samples, seed=42) == split
 
 
-def test_folder_mapping_supports_existing_rear_folder_name(tmp_path: Path):
-    for folder in ("front", "backlights_and_licence_plate", "other"):
-        path = tmp_path / folder
-        path.mkdir()
-        (path / "frame.jpg").write_bytes(b"not-decoded-in-this-test")
-    mapping = parse_folder_mappings(["rear=backlights_and_licence_plate"])
+def test_collect_mixed_source_images_needs_no_class_folders(tmp_path: Path):
+    (tmp_path / "000002.jpg").write_bytes(b"fake")
+    (tmp_path / "000001.png").write_bytes(b"fake")
+    nested = tmp_path / "camera_a"
+    nested.mkdir()
+    (nested / "000003.jpeg").write_bytes(b"fake")
+    (tmp_path / "notes.txt").write_text("ignored", encoding="utf-8")
 
-    records = collect_source_images(tmp_path, mapping)
+    records = collect_mixed_source_images(tmp_path)
 
-    assert {record["label"] for record in records} == {"front", "rear", "other"}
-    rear = next(record for record in records if record["label"] == "rear")
-    assert rear["source_relative_path"] == "backlights_and_licence_plate/frame.jpg"
+    assert [item["source_relative_path"] for item in records] == [
+        "000001.png",
+        "000002.jpg",
+        "camera_a/000003.jpeg",
+    ]
+    assert all("label" not in item for item in records)
 
 
-def test_orientation_policy_maps_other_and_uncertain_to_front():
+def test_orientation_policy_maps_side_and_uncertain_to_front():
     rear = decide_orientation([0.05, 0.90, 0.05], min_confidence=0.7, min_margin=0.1)
-    other = decide_orientation([0.10, 0.20, 0.70], min_confidence=0.7, min_margin=0.1)
+    side = decide_orientation([0.10, 0.20, 0.70], min_confidence=0.7, min_margin=0.1)
     uncertain = decide_orientation([0.45, 0.40, 0.15], min_confidence=0.7, min_margin=0.1)
 
     assert rear.semantic_label == "rear" and not rear.fallback
-    assert other.predicted_class == "other" and other.semantic_label == "front" and other.fallback
+    assert side.predicted_class == "side" and side.semantic_label == "front" and side.fallback
     assert uncertain.semantic_label == "front" and uncertain.fallback_reason == "low_confidence"
 
 
@@ -146,6 +150,37 @@ def test_fisheye_preprocessor_reuses_remap(monkeypatch: pytest.MonkeyPatch):
     assert second.shape == first.shape
     assert processor.cache_size == 1
     assert fake.calls == 2
+
+
+def test_auto_label_uses_full_vehicle_mask_and_orientation_prompt_only_for_label():
+    builder = load_build_script()
+    full = np.zeros((8, 12), dtype=bool)
+    full[1:7, 1:6] = True
+    duplicate = full.copy()
+    rear_detail = np.zeros_like(full)
+    rear_detail[2:6, 1:3] = True
+    second_vehicle = np.zeros_like(full)
+    second_vehicle[2:7, 8:11] = True
+    detections = [
+        SimpleNamespace(label="generic", prompt="vehicle", score=0.95, mask=full, box=None),
+        SimpleNamespace(label="generic", prompt="car", score=0.80, mask=duplicate, box=None),
+        SimpleNamespace(label="rear", prompt="back of a car", score=0.75, mask=rear_detail, box=None),
+        SimpleNamespace(label="generic", prompt="vehicle", score=0.90, mask=second_vehicle, box=None),
+    ]
+
+    vehicles = builder.auto_label_vehicle_instances(
+        detections,
+        min_mask_size=1,
+        nms_iou=0.8,
+        orientation_match_overlap=0.3,
+    )
+
+    rear = next(item for item in vehicles if item.label == "rear")
+    side = next(item for item in vehicles if item.label == "side")
+    assert np.array_equal(rear.mask, full)
+    assert rear.orientation_prompt == "back of a car"
+    assert side.label_source == "unmatched_generic_fallback_side"
+    assert len(vehicles) == 2
 
 
 def test_efficientnet_cpu_forward_smoke():
@@ -194,19 +229,17 @@ def test_training_epoch_and_checkpoint_cpu_smoke(tmp_path: Path):
 
     assert metrics["samples"] == 9
     assert np.asarray(metrics["confusion_matrix"]).shape == (3, 3)
-    assert loaded["class_names"] == ("front", "rear", "other")
+    assert loaded["class_names"] == ("front", "rear", "side")
     assert loaded["model_state_dict"].keys() == model.state_dict().keys()
 
 
-def test_dataset_builder_smoke_with_fake_sam3(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_dataset_builder_auto_sorts_one_mixed_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     builder = load_build_script()
-    source_root = tmp_path / "sources"
+    source_root = tmp_path / "mixed_images"
     out_dir = tmp_path / "dataset"
-    for label in ("front", "rear", "other"):
-        class_dir = source_root / label
-        class_dir.mkdir(parents=True)
-        for index in range(3):
-            (class_dir / f"{index:06d}.jpg").write_bytes(b"fake")
+    source_root.mkdir()
+    for index in range(9):
+        (source_root / f"{index:06d}.jpg").write_bytes(b"fake")
 
     class FakePreprocessor:
         def __init__(self, config):
@@ -218,12 +251,19 @@ def test_dataset_builder_smoke_with_fake_sam3(tmp_path: Path, monkeypatch: pytes
 
     class FakeDetector:
         def __init__(self, **kwargs):
-            pass
+            self.calls = 0
 
-        def detect(self, image_path, *, prompts):
-            mask = np.zeros((10, 12), dtype=bool)
-            mask[2:8, 3:10] = True
-            return [SimpleNamespace(prompt=prompts[0], score=0.9, mask=mask, box=None)]
+        def detect_labeled(self, image_path, *, labeled_prompts):
+            label = ("front", "rear", "side")[self.calls % 3]
+            self.calls += 1
+            full = np.zeros((10, 12), dtype=bool)
+            full[1:9, 1:11] = True
+            detail = np.zeros_like(full)
+            detail[2:8, 2:6] = True
+            return [
+                SimpleNamespace(label="generic", prompt="vehicle", score=0.9, mask=full, box=None),
+                SimpleNamespace(label=label, prompt=f"{label} of car", score=0.8, mask=detail, box=None),
+            ]
 
     monkeypatch.setattr(builder, "FisheyePreprocessor", FakePreprocessor)
     monkeypatch.setattr(builder, "Sam3VehicleDetector", FakeDetector)
@@ -254,27 +294,89 @@ def test_dataset_builder_smoke_with_fake_sam3(tmp_path: Path, monkeypatch: pytes
 
     builder.main()
 
-    manifest = (out_dir / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    records = load_jsonl(out_dir / "manifest.jsonl")
     summary = json.loads((out_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
-    assert len(manifest) == 9
-    assert summary["summary"]["class_counts"] == {"front": 3, "other": 3, "rear": 3}
-    assert summary["summary"]["split_counts"] == {"test": 3, "train": 3, "val": 3}
-    assert len(list((out_dir / "samples").glob("*/*/rgb.png"))) == 9
+    assert len(records) == 9
+    assert summary["summary"]["class_counts"] == {"front": 3, "rear": 3, "side": 3}
+    assert summary["summary"]["split_counts"] == {"test": 1, "train": 7, "val": 1}
+    assert len(list((out_dir / "samples").glob("*/rgb.png"))) == 9
+    assert len(list((out_dir / "review" / "front").glob("*.png"))) == 3
+    assert len(list((out_dir / "review" / "rear").glob("*.png"))) == 3
+    assert len(list((out_dir / "review" / "side").glob("*.png"))) == 3
+
+
+def test_reindex_uses_manually_moved_review_file_and_preserves_source_groups(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    reindex = load_reindex_script()
+    dataset_dir = tmp_path / "dataset"
+    records = []
+    for index, label in enumerate(("front", "front", "rear", "rear", "side", "side")):
+        sample_id = f"sample_{index}"
+        source_id = f"frame_{index // 2}"
+        review_path = dataset_dir / "review" / label / f"{sample_id}.png"
+        review_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(np.full((4, 4, 3), index, dtype=np.uint8)).save(review_path)
+        metadata_path = dataset_dir / "samples" / sample_id / "metadata.json"
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text("{}", encoding="utf-8")
+        records.append(
+            {
+                "sample_id": sample_id,
+                "source_id": source_id,
+                "label": label,
+                "initial_label": label,
+                "classifier_image": str(review_path.relative_to(dataset_dir)),
+                "masked_rgb": f"samples/{sample_id}/masked_rgb.png",
+                "metadata": str(metadata_path.relative_to(dataset_dir)),
+            }
+        )
+    from vehicle_orientation.dataset import write_jsonl
+
+    write_jsonl(dataset_dir / "manifest.jsonl", records)
+    (dataset_dir / "dataset_manifest.json").write_text("{}", encoding="utf-8")
+    moved_path = dataset_dir / "review" / "rear" / "sample_0.png"
+    (dataset_dir / "review" / "front" / "sample_0.png").replace(moved_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["reindex_dataset.py", "--dataset-dir", str(dataset_dir), "--seed", "42"],
+    )
+
+    reindex.main()
+
+    updated = load_jsonl(dataset_dir / "manifest.jsonl")
+    moved = next(item for item in updated if item["sample_id"] == "sample_0")
+    assert moved["label"] == "rear"
+    assert moved["classifier_image"] == "review/rear/sample_0.png"
+    assert moved["initial_label"] == "front"
+    source_splits: dict[str, set[str]] = {}
+    for item in updated:
+        source_splits.setdefault(item["source_id"], set()).add(item["split"])
+    assert all(len(splits) == 1 for splits in source_splits.values())
 
 
 def load_train_script():
-    script_path = PROJECT_ROOT / "vehicle_orientation" / "scripts" / "train.py"
-    spec = importlib.util.spec_from_file_location("vehicle_orientation_train", script_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_script("vehicle_orientation_train", PROJECT_ROOT / "vehicle_orientation" / "scripts" / "train.py")
 
 
 def load_build_script():
-    script_path = PROJECT_ROOT / "vehicle_orientation" / "scripts" / "build_dataset.py"
-    spec = importlib.util.spec_from_file_location("vehicle_orientation_build_dataset", script_path)
+    return load_script(
+        "vehicle_orientation_build_dataset",
+        PROJECT_ROOT / "vehicle_orientation" / "scripts" / "build_dataset.py",
+    )
+
+
+def load_reindex_script():
+    return load_script(
+        "vehicle_orientation_reindex_dataset",
+        PROJECT_ROOT / "vehicle_orientation" / "scripts" / "reindex_dataset.py",
+    )
+
+
+def load_script(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

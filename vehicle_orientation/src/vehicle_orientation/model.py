@@ -11,7 +11,7 @@ import numpy as np
 from .preprocessing import classifier_tensor_array, extract_mask_crop
 
 
-CLASS_NAMES = ("front", "rear", "other")
+CLASS_NAMES = ("front", "rear", "side")
 
 
 @dataclass(frozen=True)
@@ -46,8 +46,8 @@ def decide_orientation(
     confidence = float(probs[top_index])
     margin = confidence - float(probs[second_index])
     reason = None
-    if predicted == "other":
-        reason = "other"
+    if predicted == "side":
+        reason = "side"
     elif confidence < float(min_confidence):
         reason = "low_confidence"
     elif margin < float(min_margin):
@@ -137,4 +137,3 @@ class VehicleOrientationClassifier:
             decide_orientation(row, min_confidence=min_confidence, min_margin=min_margin)
             for row in probabilities
         ]
-

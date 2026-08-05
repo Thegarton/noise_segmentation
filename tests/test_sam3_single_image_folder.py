@@ -194,7 +194,7 @@ def test_vehicle_orientation_deduplicates_and_routes_instances():
     assert any(item.label == "ground_markings" for item in output)
 
 
-def test_other_orientation_fallback_is_recorded_as_front():
+def test_side_orientation_fallback_is_recorded_as_front():
     script = load_script()
     mask = np.ones((2, 2), dtype=bool)
 
@@ -202,13 +202,13 @@ def test_other_orientation_fallback_is_recorded_as_front():
         def classify(self, image_rgb, masks, *, min_confidence, min_margin):
             return [
                 SimpleNamespace(
-                    predicted_class="other",
+                    predicted_class="side",
                     semantic_label="front",
                     confidence=0.75,
                     margin=0.50,
                     probabilities=(0.10, 0.15, 0.75),
                     fallback=True,
-                    fallback_reason="other",
+                    fallback_reason="side",
                 )
             ]
 
@@ -225,9 +225,9 @@ def test_other_orientation_fallback_is_recorded_as_front():
     )
 
     assert output[0].label == "front_of_vehicle"
-    assert output[0].orientation_label == "other"
+    assert output[0].orientation_label == "side"
     assert output[0].orientation_fallback
-    assert output[0].orientation_fallback_reason == "other"
+    assert output[0].orientation_fallback_reason == "side"
 
 
 def test_vehicle_class_mapping_validates_stable_ids():
