@@ -305,6 +305,134 @@ def test_dataset_builder_auto_sorts_one_mixed_folder(tmp_path: Path, monkeypatch
     assert len(list((out_dir / "review" / "side").glob("*.png"))) == 3
 
 
+def test_efficientnet_bootstrap_uses_raw_side_prediction_instead_of_semantic_fallback():
+    generator = load_efficientnet_generator_script()
+    mask = np.ones((4, 4), dtype=bool)
+
+    class FakeClassifier:
+        def classify(self, image_rgb, masks, *, min_confidence, min_margin):
+            return [
+                SimpleNamespace(
+                    predicted_class="side",
+                    semantic_label="front",
+                    confidence=0.80,
+                    margin=0.60,
+                    probabilities=(0.10, 0.10, 0.80),
+                    fallback=True,
+                    fallback_reason="side",
+                )
+            ]
+
+    classified = generator.classify_vehicle_detections(
+        classifier=FakeClassifier(),
+        image_rgb=np.zeros((4, 4, 3), dtype=np.uint8),
+        detections=[SimpleNamespace(prompt="vehicle", score=0.9, mask=mask, box=None)],
+        review_min_confidence=0.70,
+        review_min_margin=0.10,
+    )
+
+    assert classified[0].label == "side"
+    assert not classified[0].needs_review
+
+
+def test_efficientnet_bootstrap_detects_only_generic_vehicles_and_builds_review_dataset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    generator = load_efficientnet_generator_script()
+    image_dir = tmp_path / "mixed_images"
+    out_dir = tmp_path / "generated_dataset"
+    image_dir.mkdir()
+    for index in range(6):
+        (image_dir / f"{index:06d}.jpg").write_bytes(b"fake")
+
+    class FakePreprocessor:
+        def __init__(self, config):
+            self.config = config
+            self.cache_size = 1
+
+        def prepare_bgr(self, image):
+            return np.zeros((10, 12, 3), dtype=np.uint8)
+
+    class FakeDetector:
+        def __init__(self, **kwargs):
+            pass
+
+        def detect(self, image_path, *, prompts):
+            assert tuple(prompts) == ("vehicle", "car", "passenger vehicle")
+            assert all("front" not in prompt and "rear" not in prompt and "side" not in prompt for prompt in prompts)
+            mask = np.zeros((10, 12), dtype=bool)
+            mask[1:9, 1:11] = True
+            return [SimpleNamespace(label="vehicle", prompt="vehicle", score=0.9, mask=mask, box=None)]
+
+    class FakeClassifier:
+        def __init__(self, checkpoint, *, device):
+            self.calls = 0
+            self.crop_padding = 0.12
+            self.input_size = 224
+            self.device = "cpu"
+
+        def classify(self, image_rgb, masks, *, min_confidence, min_margin):
+            label_index = self.calls % 3
+            self.calls += 1
+            probabilities = [0.05, 0.05, 0.05]
+            probabilities[label_index] = 0.90
+            return [
+                SimpleNamespace(
+                    predicted_class=("front", "rear", "side")[label_index],
+                    semantic_label=("front", "rear", "front")[label_index],
+                    confidence=0.90,
+                    margin=0.85,
+                    probabilities=tuple(probabilities),
+                    fallback=label_index == 2,
+                    fallback_reason="side" if label_index == 2 else None,
+                )
+            ]
+
+    monkeypatch.setattr(generator, "FisheyePreprocessor", FakePreprocessor)
+    monkeypatch.setattr(generator, "Sam3VehicleDetector", FakeDetector)
+    monkeypatch.setattr(generator, "VehicleOrientationClassifier", FakeClassifier)
+    monkeypatch.setattr(generator, "_read_bgr", lambda path: np.zeros((8, 10, 3), dtype=np.uint8))
+
+    def fake_write(path, image):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"prepared")
+
+    monkeypatch.setattr(generator, "_write_bgr", fake_write)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "generate_dataset_with_efficientnet.py",
+            "--image-dir",
+            str(image_dir),
+            "--out-dir",
+            str(out_dir),
+            "--checkpoint",
+            str(tmp_path / "model_best.pth"),
+            "--sam3-root",
+            str(tmp_path / "sam3"),
+            "--sam3-model-path",
+            str(tmp_path / "sam3.1"),
+            "--min-mask-size",
+            "1",
+        ],
+    )
+
+    generator.main()
+
+    records = load_jsonl(out_dir / "manifest.jsonl")
+    dataset_manifest = json.loads((out_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
+    assert len(records) == 6
+    assert dataset_manifest["mode"] == "sam3_vehicle_efficientnet_bootstrap"
+    assert dataset_manifest["summary"]["class_counts"] == {"front": 2, "rear": 2, "side": 2}
+    assert len(list((out_dir / "annotated").glob("*.jpg"))) == 6
+    assert len(list((out_dir / "review" / "front").glob("*.png"))) == 2
+    assert len(list((out_dir / "review" / "rear").glob("*.png"))) == 2
+    assert len(list((out_dir / "review" / "side").glob("*.png"))) == 2
+    assert all(item["label_source"] == "efficientnet_b0" for item in records)
+
+
 def test_reindex_uses_manually_moved_review_file_and_preserves_source_groups(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -441,6 +569,13 @@ def load_reindex_script():
     return load_script(
         "vehicle_orientation_reindex_dataset",
         PROJECT_ROOT / "vehicle_orientation" / "scripts" / "reindex_dataset.py",
+    )
+
+
+def load_efficientnet_generator_script():
+    return load_script(
+        "vehicle_orientation_generate_dataset_with_efficientnet",
+        PROJECT_ROOT / "vehicle_orientation" / "scripts" / "generate_dataset_with_efficientnet.py",
     )
 
 

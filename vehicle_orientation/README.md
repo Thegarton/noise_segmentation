@@ -152,6 +152,39 @@ pretrained EfficientNet-B0 is fine-tuned. `model_best.pth` is selected by
 validation macro-F1. Metrics include per-class precision, recall, F1, and a
 confusion matrix.
 
+## Generate More Training Data With EfficientNet
+
+After the first classifier is trained, use it instead of SAM3 orientation
+prompts to bootstrap a larger dataset. SAM3 receives only generic vehicle
+prompts and produces full vehicle masks. EfficientNet independently assigns
+each masked crop to `front`, `rear`, or `side`:
+
+```bash
+conda run -p /home/a60116606/miniconda3/envs/sam3 \
+  python vehicle_orientation/scripts/generate_dataset_with_efficientnet.py \
+  --image-dir /data/new_HL320/more_camera_images \
+  --out-dir ./output/vehicle_orientation_round_2 \
+  --checkpoint ./output/vehicle_orientation_efficientnet_b0/model_best.pth \
+  --sam3-root /home/a60116606/git_repo/sam3 \
+  --sam3-model-path /home/a60116606/git_repo/sam3/sam3.1 \
+  --min-score 0.45 \
+  --min-mask-size 900 \
+  --device cuda \
+  --overwrite
+```
+
+The script performs the same fisheye preprocessing, loads SAM3 and EfficientNet
+once, batches all vehicle crops from a frame through EfficientNet, and writes:
+
+- `review/front`, `review/rear`, and `review/side` for manual correction;
+- `annotated/*.jpg` with class names and classifier confidence;
+- all three probabilities, top-1 margin, SAM3 score, and timing in metadata;
+- `classifier_needs_review=true` when confidence or top-1 margin is low.
+
+Low-confidence samples still go to their EfficientNet top-1 class so the output
+always has exactly three review folders. Move or delete wrong samples, run
+`reindex_dataset.py`, and merge the corrected round with previous datasets.
+
 ## Use With SAM3
 
 The production prompt config may contain a transient label absent from the
