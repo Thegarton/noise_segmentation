@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hl320-vehicle-orientation"
+version = "0.1.0"
+description = "SAM3 mask-based front/rear/other vehicle classifier"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.25",
+  "opencv-python>=4.8",
+  "Pillow>=10.0",
+  "torch>=2.2",
+  "torchvision>=0.17",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

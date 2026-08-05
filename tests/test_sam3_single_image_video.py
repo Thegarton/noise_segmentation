@@ -58,6 +58,33 @@ def test_build_single_image_command_uses_conda_env(tmp_path: Path):
     assert command[-2:] == ["--max-images", "1"]
 
 
+def test_build_single_image_command_passes_vehicle_orientation_options(tmp_path: Path):
+    script = load_script()
+    args = make_args(
+        vehicle_orientation_checkpoint="/models/vehicle_orientation/model_best.pth",
+        vehicle_prompt_label="vehicle",
+        vehicle_orientation_device="cuda:0",
+        vehicle_orientation_min_confidence=0.72,
+        vehicle_orientation_min_margin=0.12,
+        vehicle_orientation_nms_iou=0.81,
+    )
+
+    command = script.build_single_image_command(
+        args=args,
+        image_dir=tmp_path / "frames",
+        out_dir=tmp_path / "out",
+        single_image_script=tmp_path / "run_sam3_single_image_folder.py",
+        max_images=None,
+    )
+
+    assert command[command.index("--vehicle-orientation-checkpoint") + 1] == "/models/vehicle_orientation/model_best.pth"
+    assert command[command.index("--vehicle-prompt-label") + 1] == "vehicle"
+    assert command[command.index("--vehicle-orientation-device") + 1] == "cuda:0"
+    assert command[command.index("--vehicle-orientation-min-confidence") + 1] == "0.72"
+    assert command[command.index("--vehicle-orientation-min-margin") + 1] == "0.12"
+    assert command[command.index("--vehicle-orientation-nms-iou") + 1] == "0.81"
+
+
 def test_extract_video_frames_preserves_source_frame_indices(tmp_path: Path, monkeypatch):
     script = load_script()
     video_path = tmp_path / "input.avi"
@@ -114,8 +141,16 @@ def make_args(**overrides):
         "prompt_config": "prompts.yaml",
         "classes_yaml": "classes.yaml",
         "min_score": 0.7,
+        "min_mask_size": 30,
+        "label_min_scores": None,
         "sam3_root": None,
         "sam3_model_path": None,
+        "vehicle_orientation_checkpoint": None,
+        "vehicle_prompt_label": "vehicle",
+        "vehicle_orientation_device": "auto",
+        "vehicle_orientation_min_confidence": 0.70,
+        "vehicle_orientation_min_margin": 0.10,
+        "vehicle_orientation_nms_iou": 0.80,
         "projection_dir": None,
         "projection_stem_suffix": [],
         "require_projection": False,

@@ -285,12 +285,16 @@ def build_single_image_command(
             str(Path(args.classes_yaml).expanduser()),
             "--min-score",
             str(args.min_score),
+            "--min-mask-size",
+            str(args.min_mask_size),
         ]
     )
     optional_path_args = [
         ("--sam3-root", args.sam3_root),
         ("--sam3-model-path", args.sam3_model_path),
         ("--projection-dir", args.projection_dir),
+        ("--label-min-scores", args.label_min_scores),
+        ("--vehicle-orientation-checkpoint", getattr(args, "vehicle_orientation_checkpoint", None)),
     ]
     for flag, value in optional_path_args:
         if value:
@@ -311,6 +315,21 @@ def build_single_image_command(
         command.extend(["--max-images", str(max_images)])
     if args.max_prompts is not None:
         command.extend(["--max-prompts", str(args.max_prompts)])
+    if getattr(args, "vehicle_orientation_checkpoint", None):
+        command.extend(
+            [
+                "--vehicle-prompt-label",
+                str(getattr(args, "vehicle_prompt_label", "vehicle")),
+                "--vehicle-orientation-device",
+                str(getattr(args, "vehicle_orientation_device", "auto")),
+                "--vehicle-orientation-min-confidence",
+                str(getattr(args, "vehicle_orientation_min_confidence", 0.70)),
+                "--vehicle-orientation-min-margin",
+                str(getattr(args, "vehicle_orientation_min_margin", 0.10)),
+                "--vehicle-orientation-nms-iou",
+                str(getattr(args, "vehicle_orientation_nms_iou", 0.80)),
+            ]
+        )
     return command
 
 
@@ -398,6 +417,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--classes-yaml", default=str(REPO_ROOT / "configs" / "classes_pointwise_v1.yaml"))
     parser.add_argument("--sam3-root", default=None)
     parser.add_argument("--sam3-model-path", default=None)
+    parser.add_argument("--vehicle-orientation-checkpoint", default=None)
+    parser.add_argument("--vehicle-prompt-label", default="vehicle")
+    parser.add_argument("--vehicle-orientation-device", default="auto")
+    parser.add_argument("--vehicle-orientation-min-confidence", type=float, default=0.70)
+    parser.add_argument("--vehicle-orientation-min-margin", type=float, default=0.10)
+    parser.add_argument("--vehicle-orientation-nms-iou", type=float, default=0.80)
     parser.add_argument("--sam3-conda-env", default=None, help="Run SAM3 script through `conda run -n ENV python ...`.")
     parser.add_argument("--sam3-conda-prefix", default=None, help="Run SAM3 script through `conda run -p PREFIX python ...`.")
     parser.add_argument("--projection-dir", default=None, help="Optional projection image directory passed through.")
@@ -409,6 +434,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--require-projection", action="store_true")
     parser.add_argument("--min-score", type=float, default=0.70)
+    parser.add_argument("--min-mask-size", type=int, default=30)
+    parser.add_argument(
+        "--label-min-scores",
+        default=None,
+        help="Optional per-label detection threshold YAML/JSON passed to the single-image runner.",
+    )
     parser.add_argument("--max-prompts", type=int, default=None)
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=None)

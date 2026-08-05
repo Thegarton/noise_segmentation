@@ -7,7 +7,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,15 @@ DEFAULT_PROJECTION_STEM_SUFFIXES = ("_original", "_image", "_rgb", "_camera")
 MASK_KEYS = ("masks", "pred_masks", "out_binary_masks", "video_res_masks", "mask_logits", "out_mask_logits")
 SCORE_KEYS = ("scores", "pred_scores", "object_scores", "ious", "obj_scores", "out_probs")
 BOX_KEYS = ("boxes_xyxy", "boxes", "pred_boxes", "out_boxes_xywh")
+HIGH_PRIORITY_LABELS = frozenset(
+    {
+        "ground_markings",
+        "license_plate&taillights",
+        "license_plate_and_taillights",
+    }
+)
+ARRESTOR_MIN_Y_BOTTOM = 0.6
+ARRESTOR_MIN_ASPECT_RATIO = 2.0
 
 
 @dataclass(frozen=True)
@@ -37,6 +46,13 @@ class Sam3Instance:
     score: float
     mask: np.ndarray
     box: np.ndarray | None = None
+    source_label: str | None = None
+    orientation_label: str | None = None
+    orientation_score: float | None = None
+    orientation_margin: float | None = None
+    orientation_probabilities: tuple[float, float, float] | None = None
+    orientation_fallback: bool = False
+    orientation_fallback_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +62,7 @@ class ImageResult:
     image_size: tuple[int, int]
     instances: int
     class_pixel_counts: dict[str, int]
+    orientation_predictions: tuple[dict[str, Any], ...] = ()
     projection_path: str | None = None
     projection_copy_path: str | None = None
     mask_projection_path: str | None = None
@@ -54,6 +71,9 @@ class ImageResult:
 
 def main() -> None:
     args = parse_args()
+    validate_probability(args.vehicle_orientation_min_confidence, name="vehicle_orientation_min_confidence")
+    validate_probability(args.vehicle_orientation_min_margin, name="vehicle_orientation_min_margin")
+    validate_probability(args.vehicle_orientation_nms_iou, name="vehicle_orientation_nms_iou")
     image_dir = Path(args.image_dir).expanduser().resolve()
     out_dir = Path(args.out_dir).expanduser().resolve()
     projection_dir = Path(args.projection_dir).expanduser().resolve() if args.projection_dir else None
@@ -71,9 +91,35 @@ def main() -> None:
 
     prompts_by_label = load_prompt_config(args.prompt_config)
     class_to_id = load_semantic_classes(args.classes_yaml)
+    vehicle_orientation_classifier = None
+    vehicle_class_mapping: dict[str, tuple[str, int]] | None = None
+    routed_prompt_labels: set[str] = set()
+    if args.vehicle_orientation_checkpoint:
+        if args.vehicle_prompt_label not in prompts_by_label:
+            raise ValueError(
+                "--vehicle-orientation-checkpoint requires a prompt-config entry named "
+                f"{args.vehicle_prompt_label!r}"
+            )
+        vehicle_class_mapping = resolve_vehicle_class_mapping(class_to_id)
+        vehicle_orientation_classifier = build_vehicle_orientation_classifier(
+            args.vehicle_orientation_checkpoint,
+            device=args.vehicle_orientation_device,
+        )
+        routed_prompt_labels.add(args.vehicle_prompt_label)
+
+    active_prompt_labels = {
+        label for label in prompts_by_label if label in class_to_id or label in routed_prompt_labels
+    }
     label_to_id = {label: int(class_to_id[label]) for label in prompts_by_label if label in class_to_id}
-    flat_prompts = [(label, prompt) for label, prompts in prompts_by_label.items() for prompt in prompts if label in label_to_id]
-    skipped_prompt_labels = sorted(label for label in prompts_by_label if label not in label_to_id)
+    if vehicle_class_mapping is not None:
+        label_to_id.update({label: class_id for label, class_id in vehicle_class_mapping.values()})
+    flat_prompts = [
+        (label, prompt)
+        for label, prompts in prompts_by_label.items()
+        for prompt in prompts
+        if label in active_prompt_labels
+    ]
+    skipped_prompt_labels = sorted(label for label in prompts_by_label if label not in active_prompt_labels)
     if args.max_prompts is not None:
         if args.max_prompts <= 0:
             raise ValueError(f"--max-prompts must be positive, got {args.max_prompts}")
@@ -86,11 +132,11 @@ def main() -> None:
     configure_sam3_imports(sam3_root=sam3_root, model_dir=model_dir)
     label_min_score_overrides = load_label_min_scores(
         args.label_min_scores,
-        known_labels=set(label_to_id),
+        known_labels=active_prompt_labels,
     )
     effective_label_min_scores = {
         label: float(label_min_score_overrides.get(label, args.min_score))
-        for label in label_to_id
+        for label in active_prompt_labels
     }
     predictor = build_predictor(
         model_dir=model_dir,
@@ -133,10 +179,17 @@ def main() -> None:
             label_to_id=label_to_id,
             min_score=args.min_score,
             label_min_scores=effective_label_min_scores,
+            min_mask_size=args.min_mask_size,
             prompt_log=args.prompt_log,
             projection_dir=projection_dir,
             projection_stem_suffixes=tuple(args.projection_stem_suffix),
             require_projection=args.require_projection,
+            vehicle_orientation_classifier=vehicle_orientation_classifier,
+            vehicle_prompt_label=args.vehicle_prompt_label,
+            vehicle_class_mapping=vehicle_class_mapping,
+            vehicle_orientation_min_confidence=args.vehicle_orientation_min_confidence,
+            vehicle_orientation_min_margin=args.vehicle_orientation_min_margin,
+            vehicle_orientation_nms_iou=args.vehicle_orientation_nms_iou,
         )
         processing_time_seconds = time.perf_counter() - frame_started_at
         metadata = {
@@ -152,6 +205,7 @@ def main() -> None:
             "label_min_scores_file": str(Path(args.label_min_scores).expanduser().resolve()) if args.label_min_scores else None,
             "label_min_score_overrides": label_min_score_overrides,
             "effective_label_min_scores": effective_label_min_scores,
+            "min_mask_size": int(args.min_mask_size),
             "instances": result.instances,
             "class_pixel_counts": result.class_pixel_counts,
             "projection_dir": str(projection_dir) if projection_dir is not None else None,
@@ -160,6 +214,17 @@ def main() -> None:
             "mask_projection": result.mask_projection_path,
             "projection_error": result.projection_error,
             "processing_time_seconds": round(processing_time_seconds, 6),
+            "vehicle_orientation": {
+                "enabled": vehicle_orientation_classifier is not None,
+                "checkpoint": str(Path(args.vehicle_orientation_checkpoint).expanduser().resolve())
+                if args.vehicle_orientation_checkpoint
+                else None,
+                "prompt_label": args.vehicle_prompt_label,
+                "min_confidence": float(args.vehicle_orientation_min_confidence),
+                "min_margin": float(args.vehicle_orientation_min_margin),
+                "nms_iou": float(args.vehicle_orientation_nms_iou),
+                "predictions": list(result.orientation_predictions),
+            },
         }
         (frame_out / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         if args.validate:
@@ -190,10 +255,27 @@ def main() -> None:
         "label_min_scores_file": str(Path(args.label_min_scores).expanduser().resolve()) if args.label_min_scores else None,
         "label_min_score_overrides": label_min_score_overrides,
         "effective_label_min_scores": effective_label_min_scores,
+        "min_mask_size": int(args.min_mask_size),
         "images": len(image_paths),
         "prompts": len(flat_prompts),
         "labels": label_to_id,
         "skipped_prompt_labels": skipped_prompt_labels,
+        "vehicle_orientation": {
+            "enabled": vehicle_orientation_classifier is not None,
+            "checkpoint": str(Path(args.vehicle_orientation_checkpoint).expanduser().resolve())
+            if args.vehicle_orientation_checkpoint
+            else None,
+            "prompt_label": args.vehicle_prompt_label,
+            "min_confidence": float(args.vehicle_orientation_min_confidence),
+            "min_margin": float(args.vehicle_orientation_min_margin),
+            "nms_iou": float(args.vehicle_orientation_nms_iou),
+            "class_mapping": None
+            if vehicle_class_mapping is None
+            else {
+                key: {"label": label, "class_id": class_id}
+                for key, (label, class_id) in vehicle_class_mapping.items()
+            },
+        },
         "frames": results,
     }
     manifest_path = out_dir / "sam3_single_image_folder_manifest.json"
@@ -210,10 +292,17 @@ def process_image(
     label_to_id: dict[str, int],
     min_score: float,
     label_min_scores: dict[str, float],
+    min_mask_size: int,
     prompt_log: bool,
     projection_dir: Path | None,
     projection_stem_suffixes: tuple[str, ...],
     require_projection: bool,
+    vehicle_orientation_classifier: Any | None = None,
+    vehicle_prompt_label: str = "vehicle",
+    vehicle_class_mapping: dict[str, tuple[str, int]] | None = None,
+    vehicle_orientation_min_confidence: float = 0.70,
+    vehicle_orientation_min_margin: float = 0.10,
+    vehicle_orientation_nms_iou: float = 0.80,
 ) -> ImageResult:
     from PIL import Image  # noqa: WPS433
 
@@ -244,23 +333,50 @@ def process_image(
                 score = float(scores[mask_index])
                 if score < detection_min_score:
                     continue
+                if label in label_to_id:
+                    class_id = int(label_to_id[label])
+                elif (
+                    vehicle_orientation_classifier is not None
+                    and vehicle_class_mapping is not None
+                    and label == vehicle_prompt_label
+                ):
+                    class_id = int(vehicle_class_mapping["front"][1])
+                else:
+                    raise KeyError(f"No semantic or routed class id for prompt label {label!r}")
                 instances.append(
                     Sam3Instance(
                         label=label,
-                        class_id=int(label_to_id[label]),
+                        class_id=class_id,
                         prompt=prompt,
                         score=score,
                         mask=masks[mask_index].astype(bool, copy=False),
                         box=None if boxes is None else boxes[mask_index],
+                        source_label=label if label == vehicle_prompt_label else None,
                     )
                 )
     finally:
         close_session(predictor, session_id)
 
+    if vehicle_orientation_classifier is not None:
+        if vehicle_class_mapping is None:
+            raise ValueError("vehicle_class_mapping is required when the orientation classifier is enabled")
+        instances = apply_vehicle_orientation(
+            image_rgb=np.asarray(image, dtype=np.uint8),
+            instances=instances,
+            classifier=vehicle_orientation_classifier,
+            vehicle_prompt_label=vehicle_prompt_label,
+            class_mapping=vehicle_class_mapping,
+            min_confidence=vehicle_orientation_min_confidence,
+            min_margin=vehicle_orientation_min_margin,
+            nms_iou=vehicle_orientation_nms_iou,
+            min_mask_size=min_mask_size,
+        )
+
     semantic_mask, confidence, class_pixel_counts = build_semantic_outputs(
         instances=instances,
         label_to_id=label_to_id,
         shape=(height, width),
+        min_mask_size=min_mask_size,
     )
     projection_info = save_image_outputs(
         image=image,
@@ -279,6 +395,11 @@ def process_image(
         image_size=(width, height),
         instances=len(instances),
         class_pixel_counts=class_pixel_counts,
+        orientation_predictions=tuple(
+            instance_orientation_metadata(item)
+            for item in instances
+            if item.orientation_label is not None
+        ),
         projection_path=projection_info.get("projection_path"),
         projection_copy_path=projection_info.get("projection_copy"),
         mask_projection_path=projection_info.get("mask_projection"),
@@ -316,26 +437,211 @@ def close_session(predictor: Any, session_id: str) -> None:
     predictor.handle_request(request={"type": "close_session", "session_id": session_id})
 
 
+def resolve_vehicle_class_mapping(class_to_id: dict[str, int]) -> dict[str, tuple[str, int]]:
+    expected = {
+        "front": ("front_of_vehicle", 9),
+        "rear": ("rear_of_vehicle", 10),
+    }
+    missing = [label for label, _ in expected.values() if label not in class_to_id]
+    if missing:
+        raise ValueError(f"Vehicle orientation classes are missing from classes yaml: {missing}")
+    mismatched = {
+        label: {"expected": expected_id, "actual": int(class_to_id[label])}
+        for label, expected_id in expected.values()
+        if int(class_to_id[label]) != expected_id
+    }
+    if mismatched:
+        raise ValueError(f"Vehicle orientation class ids do not match the stable taxonomy: {mismatched}")
+    return {
+        key: (label, int(class_to_id[label]))
+        for key, (label, _) in expected.items()
+    }
+
+
+def build_vehicle_orientation_classifier(checkpoint_path: str | Path, *, device: str) -> Any:
+    local_src = REPO_ROOT / "vehicle_orientation" / "src"
+    if local_src.is_dir() and str(local_src) not in sys.path:
+        sys.path.insert(0, str(local_src))
+    try:
+        from vehicle_orientation.model import VehicleOrientationClassifier  # type: ignore # noqa: WPS433
+    except ImportError as exc:
+        raise ImportError(
+            "Vehicle orientation support is not installed. Run: "
+            "pip install -e vehicle_orientation inside the SAM3 environment."
+        ) from exc
+    return VehicleOrientationClassifier(checkpoint_path, device=device)
+
+
+def apply_vehicle_orientation(
+    *,
+    image_rgb: np.ndarray,
+    instances: list[Sam3Instance],
+    classifier: Any,
+    vehicle_prompt_label: str,
+    class_mapping: dict[str, tuple[str, int]],
+    min_confidence: float,
+    min_margin: float,
+    nms_iou: float,
+    min_mask_size: int,
+) -> list[Sam3Instance]:
+    local_src = REPO_ROOT / "vehicle_orientation" / "src"
+    if local_src.is_dir() and str(local_src) not in sys.path:
+        sys.path.insert(0, str(local_src))
+    from vehicle_orientation.preprocessing import deduplicate_mask_indices  # type: ignore # noqa: WPS433
+
+    vehicle_indices = [index for index, item in enumerate(instances) if item.label == vehicle_prompt_label]
+    eligible_indices = [
+        index
+        for index in vehicle_indices
+        if int(np.count_nonzero(np.asarray(instances[index].mask, dtype=bool))) >= min_mask_size
+    ]
+    if not eligible_indices:
+        return [item for item in instances if item.label != vehicle_prompt_label]
+    keep_local = deduplicate_mask_indices(
+        [instances[index].mask for index in eligible_indices],
+        [instances[index].score for index in eligible_indices],
+        iou_threshold=nms_iou,
+    )
+    kept_indices = [eligible_indices[index] for index in keep_local]
+    decisions = classifier.classify(
+        image_rgb,
+        [instances[index].mask for index in kept_indices],
+        min_confidence=min_confidence,
+        min_margin=min_margin,
+    )
+    if len(decisions) != len(kept_indices):
+        raise ValueError(
+            "Vehicle orientation classifier returned an unexpected number of predictions: "
+            f"{len(decisions)} for {len(kept_indices)} masks"
+        )
+
+    replacements: dict[int, Sam3Instance] = {}
+    for index, decision in zip(kept_indices, decisions):
+        semantic_key = str(decision.semantic_label)
+        if semantic_key not in class_mapping:
+            raise ValueError(f"Orientation classifier returned unsupported semantic label {semantic_key!r}")
+        target_label, target_id = class_mapping[semantic_key]
+        probabilities = tuple(float(value) for value in decision.probabilities)
+        if len(probabilities) != 3:
+            raise ValueError(f"Orientation probabilities must contain front/rear/other, got {probabilities}")
+        replacements[index] = replace(
+            instances[index],
+            label=target_label,
+            class_id=target_id,
+            source_label=vehicle_prompt_label,
+            orientation_label=str(decision.predicted_class),
+            orientation_score=float(decision.confidence),
+            orientation_margin=float(decision.margin),
+            orientation_probabilities=probabilities,
+            orientation_fallback=bool(decision.fallback),
+            orientation_fallback_reason=decision.fallback_reason,
+        )
+
+    output: list[Sam3Instance] = []
+    for index, item in enumerate(instances):
+        if item.label != vehicle_prompt_label:
+            output.append(item)
+        elif index in replacements:
+            output.append(replacements[index])
+    return output
+
+
+def instance_orientation_metadata(item: Sam3Instance) -> dict[str, Any]:
+    return {
+        "source_label": item.source_label,
+        "semantic_label": item.label,
+        "class_id": int(item.class_id),
+        "predicted_orientation": item.orientation_label,
+        "orientation_score": item.orientation_score,
+        "orientation_margin": item.orientation_margin,
+        "orientation_probabilities": None
+        if item.orientation_probabilities is None
+        else list(item.orientation_probabilities),
+        "fallback": bool(item.orientation_fallback),
+        "fallback_reason": item.orientation_fallback_reason,
+        "sam3_prompt": item.prompt,
+        "sam3_score": float(item.score),
+    }
+
+
 def build_semantic_outputs(
     *,
     instances: list[Sam3Instance],
     label_to_id: dict[str, int],
     shape: tuple[int, int],
+    min_mask_size: int,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
     height, width = shape
+    if min_mask_size < 0:
+        raise ValueError(f"min_mask_size must be non-negative, got {min_mask_size}")
+
     semantic_mask = np.zeros((height, width), dtype=np.uint16)
     confidence = np.zeros((height, width), dtype=np.float32)
-    for item in sorted(instances, key=lambda x: x.score):
-        accept = item.mask & (item.score >= confidence)
-        semantic_mask[accept] = np.uint16(item.class_id)
-        confidence[accept] = np.float32(item.score)
+    priority_owner = np.zeros((height, width), dtype=bool)
 
-    class_pixel_counts = {
-        label: int(np.count_nonzero(semantic_mask == class_id))
-        for label, class_id in label_to_id.items()
-        if int(np.count_nonzero(semantic_mask == class_id)) > 0
-    }
+    ordered_instances = sorted(
+        instances,
+        key=lambda item: (
+            item.label not in HIGH_PRIORITY_LABELS,
+            -float(item.score),
+        ),
+    )
+    for item in ordered_instances:
+        item_score = float(item.score)
+        if not np.isfinite(item_score):
+            continue
+        current_mask = np.asarray(item.mask, dtype=bool)
+        if current_mask.shape != (height, width):
+            raise ValueError(
+                f"Mask for {item.label!r} has shape {current_mask.shape}, "
+                f"expected {(height, width)}"
+            )
+        if np.count_nonzero(current_mask) < min_mask_size:
+            continue
+        if reject_instance_by_geometry(item):
+            continue
+
+        is_priority = item.label in HIGH_PRIORITY_LABELS
+        if is_priority:
+            # Priority instances are already ordered by descending score.
+            accept = current_mask & ~priority_owner
+        else:
+            accept = current_mask & ~priority_owner & (item_score > confidence)
+
+        if np.count_nonzero(accept) < min_mask_size:
+            continue
+        semantic_mask[accept] = np.uint16(item.class_id)
+        confidence[accept] = np.float32(item_score)
+        if is_priority:
+            priority_owner[accept] = True
+
+    class_pixel_counts = {}
+    for label, class_id in label_to_id.items():
+        count = int(np.count_nonzero(semantic_mask == class_id))
+        if count > 0 and count >= min_mask_size:
+            class_pixel_counts[label] = count
     return semantic_mask, confidence, class_pixel_counts
+
+
+def reject_instance_by_geometry(item: Sam3Instance) -> bool:
+    if item.label != "arrestor":
+        return False
+    if item.box is None:
+        return True
+
+    box = np.asarray(item.box, dtype=np.float32).reshape(-1)
+    if box.shape != (4,) or not np.isfinite(box).all():
+        return True
+
+    x_min, y_min, box_width, box_height = (float(value) for value in box)
+    if box_height <= 1e-6 or box_width < 0.0 or x_min < 0.0 or y_min < 0.0:
+        return True
+    # SAM3.1 returns normalized [x_min, y_min, width, height], with (0, 0)
+    # in the top-left corner. Keep an arrestor only if its lower edge reaches
+    # the lower image region.
+    y_bottom = y_min + box_height
+    aspect_ratio = box_width / box_height
+    return y_bottom < ARRESTOR_MIN_Y_BOTTOM or aspect_ratio < ARRESTOR_MIN_ASPECT_RATIO
 
 
 def save_image_outputs(
@@ -382,6 +688,15 @@ def save_image_outputs(
             "prompt": item.prompt,
             "score": item.score,
             "box": None if item.box is None else np.asarray(item.box, dtype=np.float32).tolist(),
+            "source_label": item.source_label,
+            "orientation_label": item.orientation_label,
+            "orientation_score": item.orientation_score,
+            "orientation_margin": item.orientation_margin,
+            "orientation_probabilities": None
+            if item.orientation_probabilities is None
+            else list(item.orientation_probabilities),
+            "orientation_fallback": item.orientation_fallback,
+            "orientation_fallback_reason": item.orientation_fallback_reason,
         }
         for item in instances
     ]
@@ -550,6 +865,32 @@ def save_instances_npz(path: Path, instances: list[Sam3Instance], *, shape: tupl
             "labels": np.asarray([item.label for item in instances]),
             "class_ids": np.asarray([item.class_id for item in instances], dtype=np.uint16),
             "prompts": np.asarray([item.prompt for item in instances]),
+            "source_labels": np.asarray([item.source_label or "" for item in instances]),
+            "orientation_labels": np.asarray([item.orientation_label or "" for item in instances]),
+            "orientation_scores": np.asarray(
+                [np.nan if item.orientation_score is None else item.orientation_score for item in instances],
+                dtype=np.float32,
+            ),
+            "orientation_margins": np.asarray(
+                [np.nan if item.orientation_margin is None else item.orientation_margin for item in instances],
+                dtype=np.float32,
+            ),
+            "orientation_probabilities": np.asarray(
+                [
+                    (np.nan, np.nan, np.nan)
+                    if item.orientation_probabilities is None
+                    else item.orientation_probabilities
+                    for item in instances
+                ],
+                dtype=np.float32,
+            ),
+            "orientation_fallback": np.asarray(
+                [item.orientation_fallback for item in instances],
+                dtype=bool,
+            ),
+            "orientation_fallback_reasons": np.asarray(
+                [item.orientation_fallback_reason or "" for item in instances]
+            ),
         }
         if all(item.box is not None for item in instances):
             payload["boxes"] = np.stack([np.asarray(item.box, dtype=np.float32) for item in instances], axis=0)
@@ -560,6 +901,13 @@ def save_instances_npz(path: Path, instances: list[Sam3Instance], *, shape: tupl
             "labels": np.asarray([], dtype=str),
             "class_ids": np.zeros((0,), dtype=np.uint16),
             "prompts": np.asarray([], dtype=str),
+            "source_labels": np.asarray([], dtype=str),
+            "orientation_labels": np.asarray([], dtype=str),
+            "orientation_scores": np.zeros((0,), dtype=np.float32),
+            "orientation_margins": np.zeros((0,), dtype=np.float32),
+            "orientation_probabilities": np.zeros((0, 3), dtype=np.float32),
+            "orientation_fallback": np.zeros((0,), dtype=bool),
+            "orientation_fallback_reasons": np.asarray([], dtype=str),
         }
     np.savez_compressed(path, **payload)
 
@@ -783,12 +1131,19 @@ def validate_outputs(frame_out: Path) -> None:
         labels = np.asarray(data["labels"])
         class_ids = np.asarray(data["class_ids"])
         prompts = np.asarray(data["prompts"])
+        orientation_probabilities = np.asarray(data["orientation_probabilities"])
+        orientation_scores = np.asarray(data["orientation_scores"])
+        orientation_fallback = np.asarray(data["orientation_fallback"])
     if masks.ndim != 3 or masks.dtype != np.bool_:
         raise ValueError(f"instances masks must be bool[N,H,W], got {masks.shape} {masks.dtype}")
     if scores.shape != (masks.shape[0],):
         raise ValueError(f"instances scores mismatch in {frame_out}")
     if labels.shape != (masks.shape[0],) or class_ids.shape != (masks.shape[0],) or prompts.shape != (masks.shape[0],):
         raise ValueError(f"instances metadata mismatch in {frame_out}")
+    if orientation_probabilities.shape != (masks.shape[0], 3):
+        raise ValueError(f"instances orientation probabilities mismatch in {frame_out}")
+    if orientation_scores.shape != (masks.shape[0],) or orientation_fallback.shape != (masks.shape[0],):
+        raise ValueError(f"instances orientation metadata mismatch in {frame_out}")
 
 
 def configure_sam3_imports(*, sam3_root: Path | None, model_dir: Path | None) -> None:
@@ -944,6 +1299,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sam3-root", default=None, help="Path to cloned SAM3 repo, e.g. /home/.../git_repo/sam3.")
     parser.add_argument("--sam3-model-path", default=None, help="Path to local facebook/sam3.1 model directory.")
     parser.add_argument("--min-score", type=float, default=0.70)
+    parser.add_argument(
+        "--vehicle-orientation-checkpoint",
+        default=None,
+        help="Optional EfficientNet-B0 checkpoint used to route a transient vehicle prompt to front/rear classes.",
+    )
+    parser.add_argument(
+        "--vehicle-prompt-label",
+        default="vehicle",
+        help="Prompt-config label treated as a transient generic vehicle class.",
+    )
+    parser.add_argument("--vehicle-orientation-device", default="auto", help="Classifier device, for example auto, cuda, or cpu.")
+    parser.add_argument("--vehicle-orientation-min-confidence", type=float, default=0.70)
+    parser.add_argument("--vehicle-orientation-min-margin", type=float, default=0.10)
+    parser.add_argument(
+        "--vehicle-orientation-nms-iou",
+        type=float,
+        default=0.80,
+        help="Mask-IoU threshold used to merge duplicate vehicle detections from multiple prompts.",
+    )
+    parser.add_argument(
+        "--min-mask-size",
+        type=int,
+        default=30,
+        help="Minimum number of accepted pixels required to keep an instance fragment.",
+    )
     parser.add_argument(
         "--label-min-scores",
         default=None,

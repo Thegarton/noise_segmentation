@@ -49,8 +49,36 @@ PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
   --classes-yaml configs/classes_pointwise_v1.yaml \
   --sam3-root /home/a60116606/git_repo/sam3 \
   --sam3-model-path /home/a60116606/git_repo/sam3/sam3.1 \
-  --min-score 0.63
+  --min-score 0.63 \
+  --label-min-scores configs/sam3_label_min_scores.yaml \
+  --overwrite
 ```
+
+`--min-score` is the fallback threshold. The optional per-label table changes the internal SAM3 detection, image-only and new-detection thresholds before each prompt. Labels absent from the table retain the global value:
+
+```yaml
+traffic_cone: 0.30
+roadblock: 0.35
+tire: 0.35
+traffic_sign: 0.45
+```
+
+Label names must exactly match the top-level keys in the active prompt config. Per-label thresholds and the effective fallback-expanded table are saved in every frame's `metadata.json` and in the run manifest. Use `--overwrite` or a new output directory when changing thresholds, otherwise existing predictions are kept.
+
+### Vehicle front/rear classifier
+
+The standalone [`vehicle_orientation`](vehicle_orientation/README.md) project builds masked car crops with SAM3, trains an ImageNet-pretrained EfficientNet-B0 on `front/rear/other`, and optionally routes a generic `vehicle` prompt to `front_of_vehicle: 9` or `rear_of_vehicle: 10` inside the folder runner. Install it in the SAM3 environment and pass `--vehicle-orientation-checkpoint`; without that flag, the existing SAM3 behavior is unchanged.
+
+The prompt config may contain a transient label which is intentionally absent from `classes.yaml`:
+
+```yaml
+vehicle:
+  - "vehicle"
+  - "car"
+  - "passenger vehicle"
+```
+
+The runner deduplicates these masks before one batched classifier call per image. Orientation probabilities, confidence, margin, and fallback reason are saved in `instances.npz`, `instances.json`, and frame metadata. Both `license_plate_and_taillights` and the older `license_plate&taillights` spelling remain priority labels and cannot be overwritten by the vehicle mask.
 
 For video-context SAM3 runs, use `scripts/run_sam3_video_teacher.py`. The main environment does not import SAM3 directly; SAM3 should run through its own Conda environment.
 

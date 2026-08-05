@@ -1,0 +1,37 @@
+# Stable point-wise taxonomy used by the vehicle orientation hook.
+semantic_classes:
+  background: 0
+  drainage_grid: 1
+  parking_barrier_lock: 2
+  triangle_warning_sign: 3
+  arrestor: 4
+  warning_post: 5
+  screw_stubble: 6
+  fence: 7
+  air_conditioner_protective_cage: 8
+  front_of_vehicle: 9
+  rear_of_vehicle: 10
+  epoxy_floor: 11
+  pillar_corner_guard: 12
+  blind_spot_mirror: 13
+  height_restriction_sign_at_underground: 14
+  height_restriction_barrel: 15
+  underground_parking_sign: 16
+  traffic_sign: 17
+  license_plate_and_taillights: 18
+  delineator: 19
+  induction_sign: 20
+  anti_crash_barrels: 21
+  water_safety_barrier: 22
+  side_number_plate: 23
+  wheel_chock: 24
+  ground_markings: 25
+  road_stud: 26
+  flying_dust: 27
+  fog: 28
+  rain: 29
+  gas: 30
+  manhole_cover_heat_haze: 31
+  unknown_object: 32
+  ignore: 255
+
