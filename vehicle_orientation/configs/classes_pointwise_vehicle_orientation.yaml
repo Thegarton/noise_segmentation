@@ -33,5 +33,5 @@ semantic_classes:
   gas: 30
   manhole_cover_heat_haze: 31
   unknown_object: 32
+  side_of_vehicle: 33
   ignore: 255
-

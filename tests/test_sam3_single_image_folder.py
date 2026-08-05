@@ -194,7 +194,7 @@ def test_vehicle_orientation_deduplicates_and_routes_instances():
     assert any(item.label == "ground_markings" for item in output)
 
 
-def test_side_orientation_fallback_is_recorded_as_front():
+def test_side_orientation_is_recorded_as_its_own_semantic_class():
     script = load_script()
     mask = np.ones((2, 2), dtype=bool)
 
@@ -203,12 +203,12 @@ def test_side_orientation_fallback_is_recorded_as_front():
             return [
                 SimpleNamespace(
                     predicted_class="side",
-                    semantic_label="front",
+                    semantic_label="side",
                     confidence=0.75,
                     margin=0.50,
                     probabilities=(0.10, 0.15, 0.75),
-                    fallback=True,
-                    fallback_reason="side",
+                    fallback=False,
+                    fallback_reason=None,
                 )
             ]
 
@@ -217,28 +217,41 @@ def test_side_orientation_fallback_is_recorded_as_front():
         instances=[script.Sam3Instance(label="vehicle", class_id=9, prompt="vehicle", score=0.9, mask=mask)],
         classifier=FakeClassifier(),
         vehicle_prompt_label="vehicle",
-        class_mapping={"front": ("front_of_vehicle", 9), "rear": ("rear_of_vehicle", 10)},
+        class_mapping={
+            "front": ("front_of_vehicle", 9),
+            "rear": ("rear_of_vehicle", 10),
+            "side": ("side_of_vehicle", 33),
+        },
         min_confidence=0.7,
         min_margin=0.1,
         nms_iou=0.8,
         min_mask_size=1,
     )
 
-    assert output[0].label == "front_of_vehicle"
+    assert output[0].label == "side_of_vehicle"
+    assert output[0].class_id == 33
     assert output[0].orientation_label == "side"
-    assert output[0].orientation_fallback
-    assert output[0].orientation_fallback_reason == "side"
+    assert not output[0].orientation_fallback
+    assert output[0].orientation_fallback_reason is None
 
 
 def test_vehicle_class_mapping_validates_stable_ids():
     import pytest
 
     script = load_script()
-    mapping = script.resolve_vehicle_class_mapping({"front_of_vehicle": 9, "rear_of_vehicle": 10})
-    assert mapping == {"front": ("front_of_vehicle", 9), "rear": ("rear_of_vehicle", 10)}
+    mapping = script.resolve_vehicle_class_mapping(
+        {"front_of_vehicle": 9, "rear_of_vehicle": 10, "side_of_vehicle": 33}
+    )
+    assert mapping == {
+        "front": ("front_of_vehicle", 9),
+        "rear": ("rear_of_vehicle", 10),
+        "side": ("side_of_vehicle", 33),
+    }
 
     with pytest.raises(ValueError, match="stable taxonomy"):
-        script.resolve_vehicle_class_mapping({"front_of_vehicle": 10, "rear_of_vehicle": 9})
+        script.resolve_vehicle_class_mapping(
+            {"front_of_vehicle": 10, "rear_of_vehicle": 9, "side_of_vehicle": 33}
+        )
 
 
 def test_arrestor_geometry_uses_normalized_xywh_and_handles_missing_box():

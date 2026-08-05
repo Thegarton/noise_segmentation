@@ -239,8 +239,8 @@ vehicle:
   - "bus"
 ```
 
-The active semantic taxonomy must contain `front_of_vehicle: 9` and
-`rear_of_vehicle: 10`.
+The active semantic taxonomy must contain `front_of_vehicle: 9`,
+`rear_of_vehicle: 10`, and `side_of_vehicle: 33`.
 
 ```bash
 PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
@@ -259,8 +259,8 @@ PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
   --validate
 ```
 
-`rear` becomes class `10`; `front` becomes class `9`. By the current semantic
-policy, `side`, low-confidence, and low-margin predictions fall back to
-`front_of_vehicle`, while their original decision and probabilities remain in
-NPZ/JSON metadata. Without the checkpoint flag, the existing SAM3 behavior is
+`front`, `rear`, and `side` become classes `9`, `10`, and `33` respectively.
+Low-confidence and low-margin decisions keep their top-1 semantic class and are
+marked as uncertain in NPZ/JSON metadata; they are no longer relabeled as
+`front_of_vehicle`. Without the checkpoint flag, the existing SAM3 behavior is
 unchanged.

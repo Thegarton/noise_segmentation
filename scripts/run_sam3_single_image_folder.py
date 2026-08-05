@@ -441,6 +441,7 @@ def resolve_vehicle_class_mapping(class_to_id: dict[str, int]) -> dict[str, tupl
     expected = {
         "front": ("front_of_vehicle", 9),
         "rear": ("rear_of_vehicle", 10),
+        "side": ("side_of_vehicle", 33),
     }
     missing = [label for label, _ in expected.values() if label not in class_to_id]
     if missing:
@@ -1302,7 +1303,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--vehicle-orientation-checkpoint",
         default=None,
-        help="Optional EfficientNet-B0 checkpoint used to route a transient vehicle prompt to front/rear classes.",
+        help="Optional EfficientNet-B0 checkpoint used to route a transient vehicle prompt to front/rear/side classes.",
     )
     parser.add_argument(
         "--vehicle-prompt-label",

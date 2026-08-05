@@ -188,7 +188,7 @@ def main() -> None:
                 "crop_padding": crop_padding,
                 "imagenet_mean": list(IMAGENET_MEAN),
                 "imagenet_std": list(IMAGENET_STD),
-                "side_fallback": "front",
+                "uncertain_prediction_policy": "keep_top1",
             },
             indent=2,
         ),

@@ -101,13 +101,13 @@ def test_collect_mixed_source_images_needs_no_class_folders(tmp_path: Path):
     assert all("label" not in item for item in records)
 
 
-def test_orientation_policy_maps_side_and_uncertain_to_front():
+def test_orientation_policy_preserves_side_and_marks_uncertainty_without_relabeling():
     rear = decide_orientation([0.05, 0.90, 0.05], min_confidence=0.7, min_margin=0.1)
     side = decide_orientation([0.10, 0.20, 0.70], min_confidence=0.7, min_margin=0.1)
     uncertain = decide_orientation([0.45, 0.40, 0.15], min_confidence=0.7, min_margin=0.1)
 
     assert rear.semantic_label == "rear" and not rear.fallback
-    assert side.predicted_class == "side" and side.semantic_label == "front" and side.fallback
+    assert side.predicted_class == "side" and side.semantic_label == "side" and not side.fallback
     assert uncertain.semantic_label == "front" and uncertain.fallback_reason == "low_confidence"
 
 
@@ -328,7 +328,7 @@ def test_dataset_builder_auto_sorts_one_mixed_folder(tmp_path: Path, monkeypatch
     assert len(list((out_dir / "review" / "side").glob("*.png"))) == 3
 
 
-def test_efficientnet_bootstrap_uses_raw_side_prediction_instead_of_semantic_fallback():
+def test_efficientnet_bootstrap_keeps_side_prediction():
     generator = load_efficientnet_generator_script()
     mask = np.ones((4, 4), dtype=bool)
 
@@ -337,12 +337,12 @@ def test_efficientnet_bootstrap_uses_raw_side_prediction_instead_of_semantic_fal
             return [
                 SimpleNamespace(
                     predicted_class="side",
-                    semantic_label="front",
+                    semantic_label="side",
                     confidence=0.80,
                     margin=0.60,
                     probabilities=(0.10, 0.10, 0.80),
-                    fallback=True,
-                    fallback_reason="side",
+                    fallback=False,
+                    fallback_reason=None,
                 )
             ]
 
@@ -410,12 +410,12 @@ def test_efficientnet_bootstrap_detects_only_generic_vehicles_and_builds_review_
             return [
                 SimpleNamespace(
                     predicted_class=("front", "rear", "side")[label_index],
-                    semantic_label=("front", "rear", "front")[label_index],
+                    semantic_label=("front", "rear", "side")[label_index],
                     confidence=0.90,
                     margin=0.85,
                     probabilities=tuple(probabilities),
-                    fallback=label_index == 2,
-                    fallback_reason="side" if label_index == 2 else None,
+                    fallback=False,
+                    fallback_reason=None,
                 )
             ]
 

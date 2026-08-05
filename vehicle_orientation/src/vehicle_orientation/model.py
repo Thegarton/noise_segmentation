@@ -46,14 +46,12 @@ def decide_orientation(
     confidence = float(probs[top_index])
     margin = confidence - float(probs[second_index])
     reason = None
-    if predicted == "side":
-        reason = "side"
-    elif confidence < float(min_confidence):
+    if confidence < float(min_confidence):
         reason = "low_confidence"
     elif margin < float(min_margin):
         reason = "low_margin"
     fallback = reason is not None
-    semantic_label = "front" if fallback else predicted
+    semantic_label = predicted
     return OrientationDecision(
         predicted_class=predicted,
         semantic_label=semantic_label,
