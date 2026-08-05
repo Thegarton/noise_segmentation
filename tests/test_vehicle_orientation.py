@@ -338,6 +338,7 @@ def test_reindex_uses_manually_moved_review_file_and_preserves_source_groups(
     (dataset_dir / "dataset_manifest.json").write_text("{}", encoding="utf-8")
     moved_path = dataset_dir / "review" / "rear" / "sample_0.png"
     (dataset_dir / "review" / "front" / "sample_0.png").replace(moved_path)
+    (dataset_dir / "review" / "side" / "sample_5.png").unlink()
     monkeypatch.setattr(
         sys,
         "argv",
@@ -351,10 +352,78 @@ def test_reindex_uses_manually_moved_review_file_and_preserves_source_groups(
     assert moved["label"] == "rear"
     assert moved["classifier_image"] == "review/rear/sample_0.png"
     assert moved["initial_label"] == "front"
+    assert len(updated) == 5
+    assert all(item["sample_id"] != "sample_5" for item in updated)
+    dataset_manifest = json.loads((dataset_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
+    assert dataset_manifest["manual_review"]["removed_sample_ids"] == ["sample_5"]
     source_splits: dict[str, set[str]] = {}
     for item in updated:
         source_splits.setdefault(item["source_id"], set()).add(item["split"])
     assert all(len(splits) == 1 for splits in source_splits.values())
+
+
+def test_reindex_merges_multiple_datasets_with_colliding_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    reindex = load_reindex_script()
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    merged = tmp_path / "merged"
+    _create_review_dataset(first, label="front")
+    _create_review_dataset(second, label="rear")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reindex_dataset.py",
+            "--dataset-dir",
+            str(first),
+            "--dataset-dir",
+            str(second),
+            "--out-dir",
+            str(merged),
+            "--seed",
+            "42",
+        ],
+    )
+
+    reindex.main()
+
+    records = load_jsonl(merged / "manifest.jsonl")
+    assert len(records) == 2
+    assert {item["label"] for item in records} == {"front", "rear"}
+    assert len({item["sample_id"] for item in records}) == 2
+    assert len({item["source_id"] for item in records}) == 2
+    for record in records:
+        assert (merged / record["classifier_image"]).is_file()
+        assert (merged / record["metadata"]).is_file()
+        assert record["merge_origin"]["sample_id"] == "sample_0"
+
+
+def _create_review_dataset(dataset_dir: Path, *, label: str) -> None:
+    from vehicle_orientation.dataset import CLASS_NAMES, write_jsonl
+
+    for class_name in CLASS_NAMES:
+        (dataset_dir / "review" / class_name).mkdir(parents=True, exist_ok=True)
+    sample_id = "sample_0"
+    sample_dir = dataset_dir / "samples" / sample_id
+    sample_dir.mkdir(parents=True)
+    image = np.full((4, 4, 3), 127, dtype=np.uint8)
+    Image.fromarray(image).save(sample_dir / "masked_rgb.png")
+    Image.fromarray(image).save(dataset_dir / "review" / label / f"{sample_id}.png")
+    record = {
+        "sample_id": sample_id,
+        "source_id": "frame_0",
+        "label": label,
+        "initial_label": label,
+        "classifier_image": f"review/{label}/{sample_id}.png",
+        "masked_rgb": f"samples/{sample_id}/masked_rgb.png",
+        "metadata": f"samples/{sample_id}/metadata.json",
+    }
+    (sample_dir / "metadata.json").write_text(json.dumps(record), encoding="utf-8")
+    write_jsonl(dataset_dir / "manifest.jsonl", [record])
+    (dataset_dir / "dataset_manifest.json").write_text("{}", encoding="utf-8")
 
 
 def load_train_script():

@@ -77,8 +77,10 @@ Important outputs:
 ## Manual Review
 
 Open the three `review` folders and move incorrectly sorted PNG files to the
-correct folder. Do not rename or delete them. The stable assets and SAM3
-metadata remain under `samples/<sample-id>`.
+correct folder. A bad detection can be deleted. Do not rename retained files.
+During reindexing, a missing review PNG is removed from `manifest.jsonl` and
+therefore is not used for training. Its stable assets remain under
+`samples/<sample-id>` unless `--prune-removed` is explicitly passed.
 
 Check the result without writing changes:
 
@@ -96,9 +98,38 @@ python vehicle_orientation/scripts/reindex_dataset.py \
   --seed 42
 ```
 
+To also remove the stable assets of deleted review images:
+
+```bash
+python vehicle_orientation/scripts/reindex_dataset.py \
+  --dataset-dir ./output/vehicle_orientation_dataset \
+  --prune-removed
+```
+
 The split is group-aware `70/15/15`: all vehicle crops from one original frame
 remain in the same train, validation, or test split even when that frame
 contains both front and rear views.
+
+## Merge Datasets
+
+Pass `--dataset-dir` multiple times to combine reviewed datasets. A namespace
+is added to sample and source ids, so identical image names from different
+folders do not collide:
+
+```bash
+python vehicle_orientation/scripts/reindex_dataset.py \
+  --dataset-dir ./output/vehicle_dataset_parking_a \
+  --dataset-dir ./output/vehicle_dataset_parking_b \
+  --dataset-dir ./output/vehicle_dataset_road \
+  --out-dir ./output/vehicle_orientation_dataset_merged \
+  --seed 42 \
+  --overwrite
+```
+
+The input datasets are not modified. The merged directory receives copied
+`samples`, reviewed images, a combined `manifest.jsonl`, and a new group-aware
+split. The merged result can itself be reviewed and reindexed later using a
+single `--dataset-dir`.
 
 ## Train
 
