@@ -189,6 +189,41 @@ Low-confidence samples still go to their EfficientNet top-1 class so the output
 always has exactly three review folders. Move or delete wrong samples, run
 `reindex_dataset.py`, and merge the corrected round with previous datasets.
 
+### Recover Or Resume After A Crash
+
+The generator now atomically updates `manifest.jsonl` and
+`generation_state.json` after every completed source frame. If CUDA OOM or
+another error stops the process, restart the same command with `--resume` and
+without `--overwrite`:
+
+```bash
+conda run -p /home/a60116606/miniconda3/envs/sam3 \
+  python vehicle_orientation/scripts/generate_dataset_with_efficientnet.py \
+  --image-dir /data/new_HL320/more_camera_images \
+  --out-dir ./output/vehicle_orientation_round_2 \
+  --checkpoint ./output/vehicle_orientation_efficientnet_b0/model_best.pth \
+  --sam3-root /home/a60116606/git_repo/sam3 \
+  --sam3-model-path /home/a60116606/git_repo/sam3/sam3.1 \
+  --device cuda \
+  --resume
+```
+
+For an output created by the older version, where reviewed crops exist but
+`manifest.jsonl` was never written, recover it without loading SAM3 or CUDA:
+
+```bash
+python vehicle_orientation/scripts/recover_generated_dataset.py \
+  --image-dir /data/new_HL320/more_camera_images \
+  --dataset-dir ./output/vehicle_orientation_round_2
+```
+
+Recovery uses the current locations of files in `review/front`, `review/rear`,
+and `review/side`; manually deleted files stay excluded. It can reconstruct all
+fields required for training and merging. Old per-instance SAM3 confidence,
+EfficientNet probabilities, bounding boxes, and crop coordinates cannot be
+recovered because the interrupted version never wrote them to disk. After
+recovery, the same generation command can also be continued with `--resume`.
+
 ## Use With SAM3
 
 The production prompt config may contain a transient label absent from the

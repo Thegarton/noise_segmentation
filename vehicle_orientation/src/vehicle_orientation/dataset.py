@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 from collections import Counter, defaultdict
@@ -30,6 +31,14 @@ def collect_mixed_source_images(source_root: Path, *, recursive: bool = True) ->
         }
         for path in paths
     ]
+
+
+def source_id_from_relative_path(relative_path: str) -> str:
+    digest = hashlib.sha1(relative_path.encode("utf-8")).hexdigest()[:12]
+    stem = Path(relative_path).stem
+    safe_stem = "".join(character if character.isalnum() or character in "-_" else "_" for character in stem)
+    return f"{safe_stem}_{digest}"
+
 
 def assign_stratified_splits(
     samples: list[dict[str, Any]],

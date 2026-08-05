@@ -20,6 +20,7 @@ from vehicle_orientation.dataset import (  # noqa: E402
     assign_stratified_splits,
     collect_mixed_source_images,
     load_jsonl,
+    source_id_from_relative_path,
 )
 from vehicle_orientation.model import decide_orientation  # noqa: E402
 from vehicle_orientation.preprocessing import (  # noqa: E402
@@ -462,6 +463,90 @@ def test_efficientnet_bootstrap_detects_only_generic_vehicles_and_builds_review_
     assert all(item["label_source"] == "efficientnet_b0" for item in records)
 
 
+def test_generator_checkpoints_manifest_after_each_completed_frame(tmp_path: Path):
+    generator = load_efficientnet_generator_script()
+    out_dir = tmp_path / "dataset"
+    out_dir.mkdir()
+    samples = [
+        {"sample_id": "frame_0_000", "source_id": "frame_0", "label": "front"},
+        {"sample_id": "frame_1_000", "source_id": "frame_1", "label": "rear"},
+    ]
+
+    generator._checkpoint_progress(
+        out_dir=out_dir,
+        samples=samples,
+        source_results=[{"source_id": "frame_0"}, {"source_id": "frame_1"}],
+        completed_source_ids={"frame_0", "frame_1"},
+        seed=42,
+        train_ratio=0.70,
+        val_ratio=0.15,
+        status="running",
+    )
+
+    manifest = load_jsonl(out_dir / "manifest.jsonl")
+    state = json.loads((out_dir / "generation_state.json").read_text(encoding="utf-8"))
+    assert len(manifest) == 2
+    assert all("split" in item for item in manifest)
+    assert state["status"] == "running"
+    assert state["completed_source_ids"] == ["frame_0", "frame_1"]
+
+
+def test_recover_interrupted_generator_uses_current_review_folders_and_can_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    recover_script = load_recover_generator_script()
+    generator = load_efficientnet_generator_script()
+    image_dir = tmp_path / "images"
+    dataset_dir = tmp_path / "interrupted"
+    image_dir.mkdir()
+    (image_dir / "000001.jpg").write_bytes(b"source image is not decoded during recovery")
+    source_id = source_id_from_relative_path("000001.jpg")
+    sample_id = f"{source_id}_000"
+    for label in ("front", "rear", "side"):
+        (dataset_dir / "review" / label).mkdir(parents=True, exist_ok=True)
+    sample_dir = dataset_dir / "samples" / sample_id
+    sample_dir.mkdir(parents=True)
+    mask = np.zeros((4, 5), dtype=np.uint8)
+    mask[1:3, 1:4] = 255
+    Image.fromarray(mask).save(sample_dir / "mask.png")
+    Image.fromarray(np.full((4, 5, 3), 127, dtype=np.uint8)).save(sample_dir / "masked_rgb.png")
+    Image.fromarray(np.full((4, 5, 3), 127, dtype=np.uint8)).save(
+        dataset_dir / "review" / "rear" / f"{sample_id}.png"
+    )
+    annotated_path = dataset_dir / "annotated" / f"{source_id}.jpg"
+    annotated_path.parent.mkdir(parents=True)
+    annotated_path.write_bytes(b"completed frame marker")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "recover_generated_dataset.py",
+            "--image-dir",
+            str(image_dir),
+            "--dataset-dir",
+            str(dataset_dir),
+        ],
+    )
+
+    recover_script.main()
+
+    records = load_jsonl(dataset_dir / "manifest.jsonl")
+    assert len(records) == 1
+    assert records[0]["label"] == "rear"
+    assert records[0]["mask_pixels"] == 6
+    assert records[0]["recovered_metadata"]
+    source_records = collect_mixed_source_images(image_dir)
+    resumed, _, completed = generator._load_resume_progress(
+        image_dir=image_dir,
+        out_dir=dataset_dir,
+        source_records=source_records,
+        recursive=True,
+    )
+    assert [item["sample_id"] for item in resumed] == [sample_id]
+    assert completed == {source_id}
+
+
 def test_reindex_uses_manually_moved_review_file_and_preserves_source_groups(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -605,6 +690,13 @@ def load_efficientnet_generator_script():
     return load_script(
         "vehicle_orientation_generate_dataset_with_efficientnet",
         PROJECT_ROOT / "vehicle_orientation" / "scripts" / "generate_dataset_with_efficientnet.py",
+    )
+
+
+def load_recover_generator_script():
+    return load_script(
+        "vehicle_orientation_recover_generated_dataset",
+        PROJECT_ROOT / "vehicle_orientation" / "scripts" / "recover_generated_dataset.py",
     )
 
 

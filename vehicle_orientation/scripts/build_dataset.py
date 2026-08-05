@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shutil
 import sys
@@ -25,6 +24,7 @@ if str(SRC_ROOT) not in sys.path:
 from vehicle_orientation.dataset import (  # noqa: E402
     assign_stratified_splits,
     collect_mixed_source_images,
+    source_id_from_relative_path,
     summarize_manifest,
     write_jsonl,
 )
@@ -108,7 +108,7 @@ def main() -> None:
     for index, source in enumerate(source_records, start=1):
         started_at = time.perf_counter()
         source_path = Path(source["source_path"])
-        source_id = _source_id(source["source_relative_path"])
+        source_id = source_id_from_relative_path(source["source_relative_path"])
         prepared_path = out_dir / "prepared" / f"{source_id}.jpg"
         print(f"[{index:05d}/{len(source_records):05d}] {source_path}", file=sys.stderr, flush=True)
 
@@ -347,13 +347,6 @@ def _prepare_output_dir(out_dir: Path, *, overwrite: bool, source_root: Path) ->
             raise FileExistsError(f"Output directory is not empty: {out_dir}; use --overwrite")
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-
-def _source_id(relative_path: str) -> str:
-    digest = hashlib.sha1(relative_path.encode("utf-8")).hexdigest()[:12]
-    stem = Path(relative_path).stem
-    safe_stem = "".join(character if character.isalnum() or character in "-_" else "_" for character in stem)
-    return f"{safe_stem}_{digest}"
 
 
 def _read_bgr(path: Path) -> np.ndarray:
