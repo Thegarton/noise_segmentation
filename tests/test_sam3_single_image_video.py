@@ -85,6 +85,21 @@ def test_build_single_image_command_passes_vehicle_orientation_options(tmp_path:
     assert command[command.index("--vehicle-orientation-nms-iou") + 1] == "0.81"
 
 
+def test_build_single_image_command_passes_sam3_only(tmp_path: Path):
+    script = load_script()
+    args = make_args(sam3_only=True)
+
+    command = script.build_single_image_command(
+        args=args,
+        image_dir=tmp_path / "frames",
+        out_dir=tmp_path / "out",
+        single_image_script=tmp_path / "run_sam3_single_image_folder.py",
+        max_images=None,
+    )
+
+    assert "--sam3-only" in command
+
+
 def test_extract_video_frames_preserves_source_frame_indices(tmp_path: Path, monkeypatch):
     script = load_script()
     video_path = tmp_path / "input.avi"

@@ -94,7 +94,17 @@ def main() -> None:
     vehicle_orientation_classifier = None
     vehicle_class_mapping: dict[str, tuple[str, int]] | None = None
     routed_prompt_labels: set[str] = set()
-    if args.vehicle_orientation_checkpoint:
+    effective_orientation_checkpoint = args.vehicle_orientation_checkpoint
+    if args.sam3_only:
+        if effective_orientation_checkpoint:
+            print(
+                "--sam3-only is enabled; ignoring --vehicle-orientation-checkpoint",
+                file=sys.stderr,
+                flush=True,
+            )
+        effective_orientation_checkpoint = None
+
+    if effective_orientation_checkpoint:
         if args.vehicle_prompt_label not in prompts_by_label:
             raise ValueError(
                 "--vehicle-orientation-checkpoint requires a prompt-config entry named "
@@ -102,10 +112,18 @@ def main() -> None:
             )
         vehicle_class_mapping = resolve_vehicle_class_mapping(class_to_id)
         vehicle_orientation_classifier = build_vehicle_orientation_classifier(
-            args.vehicle_orientation_checkpoint,
+            effective_orientation_checkpoint,
             device=args.vehicle_orientation_device,
         )
         routed_prompt_labels.add(args.vehicle_prompt_label)
+
+    vehicle_orientation_mode = (
+        "sam3_only"
+        if args.sam3_only
+        else "efficientnet"
+        if vehicle_orientation_classifier is not None
+        else "direct_prompts"
+    )
 
     active_prompt_labels = {
         label for label in prompts_by_label if label in class_to_id or label in routed_prompt_labels
@@ -128,7 +146,13 @@ def main() -> None:
         prompt_labels = sorted(prompts_by_label)
         class_labels = sorted(class_to_id)
         transient_hint = ""
-        if args.vehicle_prompt_label in prompts_by_label and not args.vehicle_orientation_checkpoint:
+        if args.sam3_only and args.vehicle_prompt_label in prompts_by_label:
+            transient_hint = (
+                " In --sam3-only mode every top-level prompt label must exist in the "
+                "classes YAML. Use front_of_vehicle/rear_of_vehicle/side_of_vehicle "
+                "prompt sections, or add a generic vehicle semantic class."
+            )
+        elif args.vehicle_prompt_label in prompts_by_label and not effective_orientation_checkpoint:
             transient_hint = (
                 f" Prompt label {args.vehicle_prompt_label!r} is transient and requires "
                 "--vehicle-orientation-checkpoint so detections can be routed to "
@@ -229,8 +253,9 @@ def main() -> None:
             "processing_time_seconds": round(processing_time_seconds, 6),
             "vehicle_orientation": {
                 "enabled": vehicle_orientation_classifier is not None,
-                "checkpoint": str(Path(args.vehicle_orientation_checkpoint).expanduser().resolve())
-                if args.vehicle_orientation_checkpoint
+                "mode": vehicle_orientation_mode,
+                "checkpoint": str(Path(effective_orientation_checkpoint).expanduser().resolve())
+                if effective_orientation_checkpoint
                 else None,
                 "prompt_label": args.vehicle_prompt_label,
                 "min_confidence": float(args.vehicle_orientation_min_confidence),
@@ -275,8 +300,9 @@ def main() -> None:
         "skipped_prompt_labels": skipped_prompt_labels,
         "vehicle_orientation": {
             "enabled": vehicle_orientation_classifier is not None,
-            "checkpoint": str(Path(args.vehicle_orientation_checkpoint).expanduser().resolve())
-            if args.vehicle_orientation_checkpoint
+            "mode": vehicle_orientation_mode,
+            "checkpoint": str(Path(effective_orientation_checkpoint).expanduser().resolve())
+            if effective_orientation_checkpoint
             else None,
             "prompt_label": args.vehicle_prompt_label,
             "min_confidence": float(args.vehicle_orientation_min_confidence),
@@ -1326,6 +1352,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sam3-root", default=None, help="Path to cloned SAM3 repo, e.g. /home/.../git_repo/sam3.")
     parser.add_argument("--sam3-model-path", default=None, help="Path to local facebook/sam3.1 model directory.")
     parser.add_argument("--min-score", type=float, default=0.70)
+    parser.add_argument(
+        "--sam3-only",
+        action="store_true",
+        help=(
+            "Disable the vehicle orientation classifier and map SAM3 prompt labels "
+            "directly to identically named classes from --classes-yaml."
+        ),
+    )
     parser.add_argument(
         "--vehicle-orientation-checkpoint",
         default=None,

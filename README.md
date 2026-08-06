@@ -81,6 +81,22 @@ vehicle:
   - "bus"
 ```
 
+To bypass EfficientNet and classify orientation directly with SAM3 text
+prompts, pass `--sam3-only`. In this mode every top-level prompt label must
+exist in the active classes YAML, for example:
+
+```yaml
+front_of_vehicle:
+  - "front view of a four-wheeled car or truck"
+rear_of_vehicle:
+  - "rear view of a four-wheeled car or truck"
+side_of_vehicle:
+  - "side view of a four-wheeled car or truck"
+```
+
+`--sam3-only` overrides `--vehicle-orientation-checkpoint`, so EfficientNet is
+not loaded even if a wrapper also supplies a checkpoint.
+
 The positive whitelist intentionally avoids the broad `vehicle` prompt because it also covers bicycles and motorcycles. The runner deduplicates the car/truck/bus masks before one batched classifier call per image. Orientation probabilities, confidence, margin, and fallback reason are saved in `instances.npz`, `instances.json`, and frame metadata. Both `license_plate_and_taillights` and the older `license_plate&taillights` spelling remain priority labels and cannot be overwritten by the vehicle mask.
 
 For video-context SAM3 runs, use `scripts/run_sam3_video_teacher.py`. The main environment does not import SAM3 directly; SAM3 should run through its own Conda environment.

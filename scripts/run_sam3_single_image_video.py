@@ -311,6 +311,8 @@ def build_single_image_command(
         command.append("--overwrite")
     if args.validate:
         command.append("--validate")
+    if getattr(args, "sam3_only", False):
+        command.append("--sam3-only")
     if max_images is not None:
         command.extend(["--max-images", str(max_images)])
     if args.max_prompts is not None:
@@ -417,6 +419,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--classes-yaml", default=str(REPO_ROOT / "configs" / "classes_pointwise_v1.yaml"))
     parser.add_argument("--sam3-root", default=None)
     parser.add_argument("--sam3-model-path", default=None)
+    parser.add_argument(
+        "--sam3-only",
+        action="store_true",
+        help="Disable EfficientNet and use SAM3 prompt labels as semantic classes directly.",
+    )
     parser.add_argument("--vehicle-orientation-checkpoint", default=None)
     parser.add_argument("--vehicle-prompt-label", default="vehicle")
     parser.add_argument("--vehicle-orientation-device", default="auto")

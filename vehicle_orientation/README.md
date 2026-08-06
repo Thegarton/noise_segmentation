@@ -267,3 +267,9 @@ Low-confidence and low-margin decisions keep their top-1 semantic class and are
 marked as uncertain in NPZ/JSON metadata; they are no longer relabeled as
 `front_of_vehicle`. Without the checkpoint flag, the existing SAM3 behavior is
 unchanged.
+
+For direct SAM3 orientation prompts without EfficientNet, use `--sam3-only`
+and name the prompt-config sections `front_of_vehicle`, `rear_of_vehicle`, and
+`side_of_vehicle`. Those names must match the active classes YAML. A single
+transient `vehicle` section cannot produce three orientation classes without
+the classifier.
