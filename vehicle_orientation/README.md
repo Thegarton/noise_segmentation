@@ -62,6 +62,17 @@ current HL320 setup: `3840x3060`, equal-area source model, cylindrical output,
 `fov=190`, `pfov=140`, center `(960,750)`, radius `1068`, and Lanczos
 interpolation. All camera parameters have CLI overrides.
 
+The source-image mask can use different radii above and below its center. For
+example, keep the upper half at radius `860` and crop the lower half more:
+
+```bash
+--mask-upper-radius 860 \
+--mask-lower-radius 720
+```
+
+`--mask-radius` remains an alias for the upper radius. When
+`--mask-lower-radius` is omitted, both halves use the same radius as before.
+
 Important outputs:
 
 ```text

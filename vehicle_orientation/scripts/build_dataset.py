@@ -92,6 +92,7 @@ def main() -> None:
         radius=args.radius,
         interpolation=args.interpolation,
         mask_radius=args.mask_radius,
+        mask_lower_radius=args.mask_lower_radius,
         mask_center_y_offset=args.mask_center_y_offset,
         color_correction=not args.no_color_correction,
     )
@@ -429,7 +430,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--xcenter", type=float, default=960.0)
     parser.add_argument("--ycenter", type=float, default=750.0)
     parser.add_argument("--radius", type=float, default=1068.0)
-    parser.add_argument("--mask-radius", type=float, default=860.0)
+    parser.add_argument(
+        "--mask-radius",
+        "--mask-upper-radius",
+        dest="mask_radius",
+        type=float,
+        default=860.0,
+        help="Radius used for the upper half of the source-image mask.",
+    )
+    parser.add_argument(
+        "--mask-lower-radius",
+        type=float,
+        default=None,
+        help="Optional smaller radius for the lower half. Default uses --mask-radius for both halves.",
+    )
     parser.add_argument("--mask-center-y-offset", type=float, default=-125.0)
     parser.add_argument("--interpolation", choices=("linear", "cubic", "lanczos"), default="lanczos")
     parser.add_argument("--no-color-correction", action="store_true")

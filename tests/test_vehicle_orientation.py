@@ -25,6 +25,7 @@ from vehicle_orientation.dataset import (  # noqa: E402
 from vehicle_orientation.model import decide_orientation  # noqa: E402
 from vehicle_orientation.preprocessing import (  # noqa: E402
     FisheyeConfig,
+    build_split_circular_mask,
     FisheyePreprocessor,
     deduplicate_mask_indices,
     extract_mask_crop,
@@ -151,6 +152,23 @@ def test_fisheye_preprocessor_reuses_remap(monkeypatch: pytest.MonkeyPatch):
     assert second.shape == first.shape
     assert processor.cache_size == 1
     assert fake.calls == 2
+
+
+def test_split_circular_mask_uses_smaller_radius_below_center():
+    mask = build_split_circular_mask(
+        shape=(9, 9),
+        center=(4.0, 4.0),
+        upper_radius=4.0,
+        lower_radius=2.0,
+    )
+
+    assert mask.shape == (9, 9)
+    assert mask.dtype == np.bool_
+    assert mask[0, 4]
+    assert mask[4, 0]
+    assert mask[6, 4]
+    assert not mask[7, 4]
+    assert not mask[5, 6]
 
 
 def test_auto_label_uses_full_vehicle_mask_and_orientation_prompt_only_for_label():

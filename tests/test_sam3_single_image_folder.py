@@ -377,6 +377,105 @@ def test_arrestor_example_in_upper_image_is_rejected_by_bottom_edge():
     assert script.reject_instance_by_geometry(instance)
 
 
+def test_arrestor_rejects_oversized_box_and_keeps_real_example():
+    script = load_script()
+    mask = np.ones((2, 2), dtype=bool)
+    oversized = script.Sam3Instance(
+        label="arrestor",
+        class_id=4,
+        prompt="yellow and black horizontal parking barrier mounted on short floor supports",
+        score=0.6604774594306946,
+        mask=mask,
+        box=np.asarray(
+            [
+                0.01848958432674408,
+                0.37254902720451355,
+                0.9380208849906921,
+                0.22385621070861816,
+            ],
+            dtype=np.float32,
+        ),
+    )
+    correct = script.Sam3Instance(
+        label="arrestor",
+        class_id=4,
+        prompt="yellow and black horizontal parking barrier mounted on short floor supports",
+        score=0.7620818018913269,
+        mask=mask,
+        box=np.asarray(
+            [
+                0.6333333849906921,
+                0.5127451419830322,
+                0.06302084028720856,
+                0.028104575350880623,
+            ],
+            dtype=np.float32,
+        ),
+    )
+
+    assert float(oversized.box[2] * oversized.box[3]) > script.ARRESTOR_MAX_BOX_AREA
+    assert not script.reject_instance_by_geometry(oversized)
+    assert script.reject_instance_by_size(oversized)
+    assert not script.reject_instance_by_geometry(correct)
+    assert not script.reject_instance_by_size(correct)
+
+
+def test_arrestor_size_rules_check_width_height_and_area_independently():
+    script = load_script()
+    mask = np.ones((2, 2), dtype=bool)
+
+    def instance(box):
+        return script.Sam3Instance(
+            label="arrestor",
+            class_id=4,
+            prompt="arrestor",
+            score=0.9,
+            mask=mask,
+            box=np.asarray(box, dtype=np.float32),
+        )
+
+    assert script.reject_instance_by_size(instance([0.0, 0.55, 0.90, 0.05]))
+    assert script.reject_instance_by_size(instance([0.1, 0.40, 0.50, 0.22]))
+    assert script.reject_instance_by_size(instance([0.1, 0.40, 0.80, 0.20]))
+
+
+def test_size_filter_rules_support_multiple_labels():
+    script = load_script()
+    mask = np.ones((2, 2), dtype=bool)
+    rules = {
+        "arrestor": {"max_box_area": 0.15},
+        "traffic_sign": {"min_box_height": 0.05, "max_box_height": 0.4},
+    }
+    rejected = script.Sam3Instance(
+        label="traffic_sign",
+        class_id=17,
+        prompt="traffic sign",
+        score=0.9,
+        mask=mask,
+        box=np.asarray([0.1, 0.2, 0.1, 0.02], dtype=np.float32),
+    )
+    accepted = script.Sam3Instance(
+        label="traffic_sign",
+        class_id=17,
+        prompt="traffic sign",
+        score=0.9,
+        mask=mask,
+        box=np.asarray([0.1, 0.2, 0.1, 0.1], dtype=np.float32),
+    )
+    unchecked = script.Sam3Instance(
+        label="ground_markings",
+        class_id=25,
+        prompt="ground markings",
+        score=0.9,
+        mask=mask,
+        box=None,
+    )
+
+    assert script.reject_instance_by_size(rejected, rules=rules)
+    assert not script.reject_instance_by_size(accepted, rules=rules)
+    assert not script.reject_instance_by_size(unchecked, rules=rules)
+
+
 def test_geometry_filter_rules_support_multiple_labels():
     script = load_script()
     mask = np.ones((2, 2), dtype=bool)

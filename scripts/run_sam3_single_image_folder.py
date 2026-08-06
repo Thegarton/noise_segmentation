@@ -36,13 +36,23 @@ HIGH_PRIORITY_LABELS = frozenset(
 )
 GEOMETRY_FILTER_RULES: dict[str, dict[str, float]] = {
     "arrestor": {
-        "min_y_bottom": 0.6,
+        "min_y_bottom": 0.5,
         "min_aspect_ratio": 2.0,
+    },
+}
+SIZE_FILTER_RULES: dict[str, dict[str, float]] = {
+    "arrestor": {
+        "max_box_width": 0.85,
+        "max_box_height": 0.21,
+        "max_box_area": 0.15,
     },
 }
 # Backward-compatible names used by existing callers and tests.
 ARRESTOR_MIN_Y_BOTTOM = GEOMETRY_FILTER_RULES["arrestor"]["min_y_bottom"]
 ARRESTOR_MIN_ASPECT_RATIO = GEOMETRY_FILTER_RULES["arrestor"]["min_aspect_ratio"]
+ARRESTOR_MAX_BOX_WIDTH = SIZE_FILTER_RULES["arrestor"]["max_box_width"]
+ARRESTOR_MAX_BOX_HEIGHT = SIZE_FILTER_RULES["arrestor"]["max_box_height"]
+ARRESTOR_MAX_BOX_AREA = SIZE_FILTER_RULES["arrestor"]["max_box_area"]
 
 
 @dataclass(frozen=True)
@@ -701,6 +711,8 @@ def build_semantic_outputs(
             continue
         if reject_instance_by_geometry(item):
             continue
+        if reject_instance_by_size(item):
+            continue
 
         is_priority = item.label in HIGH_PRIORITY_LABELS
         if is_priority:
@@ -759,13 +771,67 @@ def reject_instance_by_geometry(
         return True
 
     x_min, y_min, box_width, box_height = (float(value) for value in box)
-    if box_height <= 1e-6 or box_width < 0.0 or x_min < 0.0 or y_min < 0.0:
+    if box_height <= 1e-6 or box_width <= 1e-6 or x_min < 0.0 or y_min < 0.0:
         return True
     # SAM3.1 returns normalized [x_min, y_min, width, height], with (0, 0)
     # in the top-left corner.
     y_bottom = y_min + box_height
     aspect_ratio = box_width / box_height
     return y_bottom < min_y_bottom or aspect_ratio < min_aspect_ratio
+
+
+def reject_instance_by_size(
+    item: Sam3Instance,
+    *,
+    rules: Mapping[str, Mapping[str, float]] = SIZE_FILTER_RULES,
+) -> bool:
+    rule = rules.get(item.label)
+    if rule is None:
+        return False
+
+    try:
+        min_box_width = float(rule.get("min_box_width", 0.0))
+        max_box_width = float(rule.get("max_box_width", 1.0))
+        min_box_height = float(rule.get("min_box_height", 0.0))
+        max_box_height = float(rule.get("max_box_height", 1.0))
+        min_box_area = float(rule.get("min_box_area", 0.0))
+        max_box_area = float(rule.get("max_box_area", 1.0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid size filter rule for label {item.label!r}: {rule!r}"
+        ) from exc
+    if (
+        not 0.0 <= min_box_width <= max_box_width <= 1.0
+        or not 0.0 <= min_box_height <= max_box_height <= 1.0
+        or not 0.0 <= min_box_area <= max_box_area <= 1.0
+    ):
+        raise ValueError(
+            f"Invalid size filter thresholds for label {item.label!r}: "
+            f"box_width=[{min_box_width},{max_box_width}], "
+            f"box_height=[{min_box_height},{max_box_height}], "
+            f"box_area=[{min_box_area},{max_box_area}]"
+        )
+
+    if item.box is None:
+        return True
+
+    box = np.asarray(item.box, dtype=np.float32).reshape(-1)
+    if box.shape != (4,) or not np.isfinite(box).all():
+        return True
+
+    x_min, y_min, box_width, box_height = (float(value) for value in box)
+    if box_height <= 1e-6 or box_width <= 1e-6 or x_min < 0.0 or y_min < 0.0:
+        return True
+
+    box_area = box_width * box_height
+    return (
+        box_width < min_box_width
+        or box_width > max_box_width
+        or box_height < min_box_height
+        or box_height > max_box_height
+        or box_area < min_box_area
+        or box_area > max_box_area
+    )
 
 
 def save_image_outputs(

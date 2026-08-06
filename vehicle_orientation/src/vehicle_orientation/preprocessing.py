@@ -27,6 +27,7 @@ class FisheyeConfig:
     radius: float = 1068.0
     interpolation: str = "lanczos"
     mask_radius: float = 860.0
+    mask_lower_radius: float | None = None
     mask_center_y_offset: float = -125.0
     color_correction: bool = True
 
@@ -74,6 +75,7 @@ class FisheyePreprocessor:
             corrected,
             center=(width / 2.0, height / 2.0 + self.config.mask_center_y_offset),
             radius=self.config.mask_radius,
+            lower_radius=self.config.mask_lower_radius,
         )
         key = (height, width, self.config)
         remap = self._remap_cache.get(key)
@@ -118,16 +120,55 @@ def simple_colour_correction(image: np.ndarray, *, low_percentile: float = 1.0, 
     return np.clip(output, 0.0, 255.0).astype(np.uint8)
 
 
-def apply_circular_mask(image: np.ndarray, *, center: tuple[float, float], radius: float) -> np.ndarray:
+def apply_circular_mask(
+    image: np.ndarray,
+    *,
+    center: tuple[float, float],
+    radius: float,
+    lower_radius: float | None = None,
+) -> np.ndarray:
     arr = _validate_rgb_like(image, name="image")
     if radius <= 0.0:
         raise ValueError(f"radius must be positive, got {radius}")
     height, width = arr.shape[:2]
-    yy, xx = np.ogrid[:height, :width]
-    inside = (xx - float(center[0])) ** 2 + (yy - float(center[1])) ** 2 <= float(radius) ** 2
+    inside = build_split_circular_mask(
+        shape=(height, width),
+        center=center,
+        upper_radius=radius,
+        lower_radius=lower_radius,
+    )
     output = np.zeros_like(arr)
     output[inside] = arr[inside]
     return output
+
+
+def build_split_circular_mask(
+    *,
+    shape: tuple[int, int],
+    center: tuple[float, float],
+    upper_radius: float,
+    lower_radius: float | None = None,
+) -> np.ndarray:
+    """Build a mask whose upper and lower image halves use different radii."""
+    height, width = _validate_shape(shape, name="shape")
+    upper = float(upper_radius)
+    lower = upper if lower_radius is None else float(lower_radius)
+    if not np.isfinite(upper) or upper <= 0.0:
+        raise ValueError(f"upper_radius must be positive and finite, got {upper_radius}")
+    if not np.isfinite(lower) or lower <= 0.0:
+        raise ValueError(f"lower_radius must be positive and finite, got {lower_radius}")
+
+    center_x, center_y = (float(value) for value in center)
+    if not np.isfinite(center_x) or not np.isfinite(center_y):
+        raise ValueError(f"center must be finite, got {center}")
+    yy, xx = np.ogrid[:height, :width]
+    distance_squared = (xx - center_x) ** 2 + (yy - center_y) ** 2
+    upper_half = yy <= center_y
+    return np.where(
+        upper_half,
+        distance_squared <= upper**2,
+        distance_squared <= lower**2,
+    )
 
 
 def extract_mask_crop(
@@ -368,4 +409,3 @@ def _interpolation_flag(cv2: Any, value: str) -> int:
     if value not in flags:
         raise ValueError(f"Unsupported interpolation: {value}")
     return flags[value]
-
