@@ -194,6 +194,53 @@ def test_vehicle_orientation_deduplicates_and_routes_instances():
     assert any(item.label == "ground_markings" for item in output)
 
 
+def test_deduplicate_instances_applies_per_label_and_preserves_other_classes():
+    script = load_script()
+    object_mask = np.zeros((5, 5), dtype=bool)
+    object_mask[1:4, 1:4] = True
+    separate_mask = np.zeros((5, 5), dtype=bool)
+    separate_mask[0, 0] = True
+    instances = [
+        script.Sam3Instance(
+            label="traffic_cone",
+            class_id=15,
+            prompt="traffic cone",
+            score=0.93,
+            mask=object_mask,
+        ),
+        script.Sam3Instance(
+            label="traffic_cone",
+            class_id=15,
+            prompt="road cone",
+            score=0.81,
+            mask=object_mask.copy(),
+        ),
+        script.Sam3Instance(
+            label="roadblock",
+            class_id=11,
+            prompt="roadblock",
+            score=0.75,
+            mask=object_mask.copy(),
+        ),
+        script.Sam3Instance(
+            label="traffic_cone",
+            class_id=15,
+            prompt="traffic cone",
+            score=0.70,
+            mask=separate_mask,
+        ),
+    ]
+
+    output = script.deduplicate_instances_by_label(instances, iou_threshold=0.8)
+
+    assert [(item.label, item.prompt) for item in output] == [
+        ("traffic_cone", "traffic cone"),
+        ("roadblock", "roadblock"),
+        ("traffic_cone", "traffic cone"),
+    ]
+    assert [item.score for item in output] == [0.93, 0.75, 0.70]
+
+
 def test_side_orientation_is_recorded_as_its_own_semantic_class():
     script = load_script()
     mask = np.ones((2, 2), dtype=bool)

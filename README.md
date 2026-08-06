@@ -97,6 +97,14 @@ side_of_vehicle:
 `--sam3-only` overrides `--vehicle-orientation-checkpoint`, so EfficientNet is
 not loaded even if a wrapper also supplies a checkpoint.
 
+After all prompts have run, masks are deduplicated independently for every
+label. For masks of the same label, the highest-confidence mask is kept and
+lower-confidence masks whose Mask IoU exceeds
+`--mask-nms-iou` (default `0.8`) are removed. The older
+`--vehicle-orientation-nms-iou` spelling remains available as an alias. Masks belonging to
+different labels are not suppressed by this step. This applies both with
+EfficientNet and in `--sam3-only` mode.
+
 The positive whitelist intentionally avoids the broad `vehicle` prompt because it also covers bicycles and motorcycles. The runner deduplicates the car/truck/bus masks before one batched classifier call per image. Orientation probabilities, confidence, margin, and fallback reason are saved in `instances.npz`, `instances.json`, and frame metadata. Both `license_plate_and_taillights` and the older `license_plate&taillights` spelling remain priority labels and cannot be overwritten by the vehicle mask.
 
 For video-context SAM3 runs, use `scripts/run_sam3_video_teacher.py`. The main environment does not import SAM3 directly; SAM3 should run through its own Conda environment.

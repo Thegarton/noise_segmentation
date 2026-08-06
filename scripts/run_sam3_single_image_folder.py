@@ -243,6 +243,7 @@ def main() -> None:
             "label_min_score_overrides": label_min_score_overrides,
             "effective_label_min_scores": effective_label_min_scores,
             "min_mask_size": int(args.min_mask_size),
+            "mask_nms_iou": float(args.vehicle_orientation_nms_iou),
             "instances": result.instances,
             "class_pixel_counts": result.class_pixel_counts,
             "projection_dir": str(projection_dir) if projection_dir is not None else None,
@@ -294,6 +295,7 @@ def main() -> None:
         "label_min_score_overrides": label_min_score_overrides,
         "effective_label_min_scores": effective_label_min_scores,
         "min_mask_size": int(args.min_mask_size),
+        "mask_nms_iou": float(args.vehicle_orientation_nms_iou),
         "images": len(image_paths),
         "prompts": len(flat_prompts),
         "labels": label_to_id,
@@ -395,6 +397,11 @@ def process_image(
                 )
     finally:
         close_session(predictor, session_id)
+
+    instances = deduplicate_instances_by_label(
+        instances,
+        iou_threshold=vehicle_orientation_nms_iou,
+    )
 
     if vehicle_orientation_classifier is not None:
         if vehicle_class_mapping is None:
@@ -523,6 +530,40 @@ def build_vehicle_orientation_classifier(checkpoint_path: str | Path, *, device:
             "pip install -e vehicle_orientation inside the SAM3 environment."
         ) from exc
     return VehicleOrientationClassifier(checkpoint_path, device=device)
+
+
+def deduplicate_instances_by_label(
+    instances: list[Sam3Instance],
+    *,
+    iou_threshold: float,
+) -> list[Sam3Instance]:
+    """Suppress duplicate masks from different prompts of the same semantic label."""
+    validate_probability(iou_threshold, name="mask_nms_iou")
+    if len(instances) < 2:
+        return list(instances)
+
+    local_src = REPO_ROOT / "vehicle_orientation" / "src"
+    if local_src.is_dir() and str(local_src) not in sys.path:
+        sys.path.insert(0, str(local_src))
+    from vehicle_orientation.preprocessing import deduplicate_mask_indices  # type: ignore # noqa: WPS433
+
+    indices_by_label: dict[str, list[int]] = {}
+    for index, item in enumerate(instances):
+        indices_by_label.setdefault(item.label, []).append(index)
+
+    kept_indices: set[int] = set()
+    for label_indices in indices_by_label.values():
+        if len(label_indices) == 1:
+            kept_indices.add(label_indices[0])
+            continue
+        keep_local = deduplicate_mask_indices(
+            [instances[index].mask for index in label_indices],
+            [instances[index].score for index in label_indices],
+            iou_threshold=iou_threshold,
+        )
+        kept_indices.update(label_indices[index] for index in keep_local)
+
+    return [item for index, item in enumerate(instances) if index in kept_indices]
 
 
 def apply_vehicle_orientation(
@@ -1374,10 +1415,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vehicle-orientation-min-confidence", type=float, default=0.70)
     parser.add_argument("--vehicle-orientation-min-margin", type=float, default=0.10)
     parser.add_argument(
+        "--mask-nms-iou",
         "--vehicle-orientation-nms-iou",
+        dest="vehicle_orientation_nms_iou",
         type=float,
         default=0.80,
-        help="Mask-IoU threshold used to merge duplicate vehicle detections from multiple prompts.",
+        help=(
+            "Mask-IoU threshold used to merge duplicate detections from multiple "
+            "prompts of the same label for all classes. The old "
+            "--vehicle-orientation-nms-iou name remains as an alias."
+        ),
     )
     parser.add_argument(
         "--min-mask-size",
