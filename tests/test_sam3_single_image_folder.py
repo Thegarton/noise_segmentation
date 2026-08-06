@@ -377,6 +377,46 @@ def test_arrestor_example_in_upper_image_is_rejected_by_bottom_edge():
     assert script.reject_instance_by_geometry(instance)
 
 
+def test_geometry_filter_rules_support_multiple_labels():
+    script = load_script()
+    mask = np.ones((2, 2), dtype=bool)
+    rules = {
+        "arrestor": {"min_y_bottom": 0.6, "min_aspect_ratio": 2.0},
+        "height_restriction_barrel": {
+            "min_y_bottom": 0.4,
+            "min_aspect_ratio": 0.5,
+        },
+    }
+    rejected = script.Sam3Instance(
+        label="height_restriction_barrel",
+        class_id=15,
+        prompt="height restriction barrel",
+        score=0.9,
+        mask=mask,
+        box=np.asarray([0.1, 0.1, 0.2, 0.2], dtype=np.float32),
+    )
+    accepted = script.Sam3Instance(
+        label="height_restriction_barrel",
+        class_id=15,
+        prompt="height restriction barrel",
+        score=0.9,
+        mask=mask,
+        box=np.asarray([0.1, 0.3, 0.2, 0.2], dtype=np.float32),
+    )
+    unchecked = script.Sam3Instance(
+        label="traffic_sign",
+        class_id=17,
+        prompt="traffic sign",
+        score=0.9,
+        mask=mask,
+        box=None,
+    )
+
+    assert script.reject_instance_by_geometry(rejected, rules=rules)
+    assert not script.reject_instance_by_geometry(accepted, rules=rules)
+    assert not script.reject_instance_by_geometry(unchecked, rules=rules)
+
+
 def test_make_overlay_can_draw_class_name_and_score():
     script = load_script()
     image = np.full((40, 60, 3), 220, dtype=np.uint8)

@@ -105,6 +105,11 @@ lower-confidence masks whose Mask IoU exceeds
 different labels are not suppressed by this step. This applies both with
 EfficientNet and in `--sam3-only` mode.
 
+Optional normalized-box geometry filters are configured in
+`GEOMETRY_FILTER_RULES` inside `run_sam3_single_image_folder.py`. Each entry is
+keyed by the exact semantic label and defines `min_y_bottom` and
+`min_aspect_ratio`. Labels absent from the table bypass geometry filtering.
+
 The positive whitelist intentionally avoids the broad `vehicle` prompt because it also covers bicycles and motorcycles. The runner deduplicates the car/truck/bus masks before one batched classifier call per image. Orientation probabilities, confidence, margin, and fallback reason are saved in `instances.npz`, `instances.json`, and frame metadata. Both `license_plate_and_taillights` and the older `license_plate&taillights` spelling remain priority labels and cannot be overwritten by the vehicle mask.
 
 For video-context SAM3 runs, use `scripts/run_sam3_video_teacher.py`. The main environment does not import SAM3 directly; SAM3 should run through its own Conda environment.

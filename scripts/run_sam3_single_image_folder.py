@@ -9,7 +9,7 @@ import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -34,8 +34,15 @@ HIGH_PRIORITY_LABELS = frozenset(
         "license_plate_and_taillights",
     }
 )
-ARRESTOR_MIN_Y_BOTTOM = 0.6
-ARRESTOR_MIN_ASPECT_RATIO = 2.0
+GEOMETRY_FILTER_RULES: dict[str, dict[str, float]] = {
+    "arrestor": {
+        "min_y_bottom": 0.6,
+        "min_aspect_ratio": 2.0,
+    },
+}
+# Backward-compatible names used by existing callers and tests.
+ARRESTOR_MIN_Y_BOTTOM = GEOMETRY_FILTER_RULES["arrestor"]["min_y_bottom"]
+ARRESTOR_MIN_ASPECT_RATIO = GEOMETRY_FILTER_RULES["arrestor"]["min_aspect_ratio"]
 
 
 @dataclass(frozen=True)
@@ -717,9 +724,33 @@ def build_semantic_outputs(
     return semantic_mask, confidence, class_pixel_counts
 
 
-def reject_instance_by_geometry(item: Sam3Instance) -> bool:
-    if item.label != "arrestor":
+def reject_instance_by_geometry(
+    item: Sam3Instance,
+    *,
+    rules: Mapping[str, Mapping[str, float]] = GEOMETRY_FILTER_RULES,
+) -> bool:
+    rule = rules.get(item.label)
+    if rule is None:
         return False
+
+    try:
+        min_y_bottom = float(rule["min_y_bottom"])
+        min_aspect_ratio = float(rule["min_aspect_ratio"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid geometry filter rule for label {item.label!r}: {rule!r}"
+        ) from exc
+    if (
+        not np.isfinite(min_y_bottom)
+        or not 0.0 <= min_y_bottom <= 1.0
+        or not np.isfinite(min_aspect_ratio)
+        or min_aspect_ratio < 0.0
+    ):
+        raise ValueError(
+            f"Invalid geometry filter thresholds for label {item.label!r}: "
+            f"min_y_bottom={min_y_bottom}, min_aspect_ratio={min_aspect_ratio}"
+        )
+
     if item.box is None:
         return True
 
@@ -731,11 +762,10 @@ def reject_instance_by_geometry(item: Sam3Instance) -> bool:
     if box_height <= 1e-6 or box_width < 0.0 or x_min < 0.0 or y_min < 0.0:
         return True
     # SAM3.1 returns normalized [x_min, y_min, width, height], with (0, 0)
-    # in the top-left corner. Keep an arrestor only if its lower edge reaches
-    # the lower image region.
+    # in the top-left corner.
     y_bottom = y_min + box_height
     aspect_ratio = box_width / box_height
-    return y_bottom < ARRESTOR_MIN_Y_BOTTOM or aspect_ratio < ARRESTOR_MIN_ASPECT_RATIO
+    return y_bottom < min_y_bottom or aspect_ratio < min_aspect_ratio
 
 
 def save_image_outputs(
