@@ -239,8 +239,10 @@ vehicle:
   - "bus"
 ```
 
-The active semantic taxonomy must contain `front_of_vehicle: 9`,
-`rear_of_vehicle: 10`, and `side_of_vehicle: 33`.
+The active semantic taxonomy must contain `front_of_vehicle`,
+`rear_of_vehicle`, and `side_of_vehicle`. Their numeric ids are read from the
+active classes YAML, so both a compact camera-only taxonomy such as `1/2/3`
+and a larger project taxonomy such as `9/10/33` are supported.
 
 ```bash
 PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
@@ -259,7 +261,8 @@ PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
   --validate
 ```
 
-`front`, `rear`, and `side` become classes `9`, `10`, and `33` respectively.
+`front`, `rear`, and `side` are mapped to the ids assigned to the corresponding
+classes in the active classes YAML.
 Low-confidence and low-margin decisions keep their top-1 semantic class and are
 marked as uncertain in NPZ/JSON metadata; they are no longer relabeled as
 `front_of_vehicle`. Without the checkpoint flag, the existing SAM3 behavior is

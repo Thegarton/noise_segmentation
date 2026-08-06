@@ -235,22 +235,39 @@ def test_side_orientation_is_recorded_as_its_own_semantic_class():
     assert output[0].orientation_fallback_reason is None
 
 
-def test_vehicle_class_mapping_validates_stable_ids():
+def test_vehicle_class_mapping_uses_active_taxonomy_ids():
     import pytest
 
     script = load_script()
     mapping = script.resolve_vehicle_class_mapping(
-        {"front_of_vehicle": 9, "rear_of_vehicle": 10, "side_of_vehicle": 33}
+        {
+            "background": 0,
+            "front_of_vehicle": 1,
+            "rear_of_vehicle": 2,
+            "side_of_vehicle": 3,
+            "ignore": 255,
+        }
     )
     assert mapping == {
-        "front": ("front_of_vehicle", 9),
-        "rear": ("rear_of_vehicle", 10),
-        "side": ("side_of_vehicle", 33),
+        "front": ("front_of_vehicle", 1),
+        "rear": ("rear_of_vehicle", 2),
+        "side": ("side_of_vehicle", 3),
     }
 
-    with pytest.raises(ValueError, match="stable taxonomy"):
+    with pytest.raises(ValueError, match="unique ids"):
         script.resolve_vehicle_class_mapping(
-            {"front_of_vehicle": 10, "rear_of_vehicle": 9, "side_of_vehicle": 33}
+            {"front_of_vehicle": 1, "rear_of_vehicle": 1, "side_of_vehicle": 3}
+        )
+
+    with pytest.raises(ValueError, match="background/ignore"):
+        script.resolve_vehicle_class_mapping(
+            {
+                "background": 0,
+                "front_of_vehicle": 0,
+                "rear_of_vehicle": 2,
+                "side_of_vehicle": 3,
+                "ignore": 255,
+            }
         )
 
 

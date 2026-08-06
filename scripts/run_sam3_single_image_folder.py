@@ -125,7 +125,20 @@ def main() -> None:
             raise ValueError(f"--max-prompts must be positive, got {args.max_prompts}")
         flat_prompts = flat_prompts[: args.max_prompts]
     if not flat_prompts:
-        raise ValueError("Prompt config produced no prompts whose labels exist in classes yaml")
+        prompt_labels = sorted(prompts_by_label)
+        class_labels = sorted(class_to_id)
+        transient_hint = ""
+        if args.vehicle_prompt_label in prompts_by_label and not args.vehicle_orientation_checkpoint:
+            transient_hint = (
+                f" Prompt label {args.vehicle_prompt_label!r} is transient and requires "
+                "--vehicle-orientation-checkpoint so detections can be routed to "
+                "front_of_vehicle/rear_of_vehicle/side_of_vehicle."
+            )
+        raise ValueError(
+            "Prompt config produced no active prompts. "
+            f"Prompt labels: {prompt_labels}; classes yaml labels: {class_labels}."
+            f"{transient_hint}"
+        )
 
     sam3_root = Path(args.sam3_root).expanduser().resolve() if args.sam3_root else None
     model_dir = resolve_model_dir(sam3_root=sam3_root, sam3_model_path=args.sam3_model_path)
@@ -438,25 +451,38 @@ def close_session(predictor: Any, session_id: str) -> None:
 
 
 def resolve_vehicle_class_mapping(class_to_id: dict[str, int]) -> dict[str, tuple[str, int]]:
-    expected = {
-        "front": ("front_of_vehicle", 9),
-        "rear": ("rear_of_vehicle", 10),
-        "side": ("side_of_vehicle", 33),
+    class_names = {
+        "front": "front_of_vehicle",
+        "rear": "rear_of_vehicle",
+        "side": "side_of_vehicle",
     }
-    missing = [label for label, _ in expected.values() if label not in class_to_id]
+    missing = [label for label in class_names.values() if label not in class_to_id]
     if missing:
         raise ValueError(f"Vehicle orientation classes are missing from classes yaml: {missing}")
-    mismatched = {
-        label: {"expected": expected_id, "actual": int(class_to_id[label])}
-        for label, expected_id in expected.values()
-        if int(class_to_id[label]) != expected_id
+
+    mapping = {
+        orientation: (label, int(class_to_id[label]))
+        for orientation, label in class_names.items()
     }
-    if mismatched:
-        raise ValueError(f"Vehicle orientation class ids do not match the stable taxonomy: {mismatched}")
-    return {
-        key: (label, int(class_to_id[label]))
-        for key, (label, _) in expected.items()
+    class_ids = [class_id for _, class_id in mapping.values()]
+    if len(set(class_ids)) != len(class_ids):
+        raise ValueError(f"Vehicle orientation classes must have unique ids, got {mapping}")
+    reserved = {
+        int(class_to_id[label])
+        for label in ("background", "ignore")
+        if label in class_to_id
     }
+    collisions = {
+        label: class_id
+        for label, class_id in mapping.values()
+        if class_id in reserved
+    }
+    if collisions:
+        raise ValueError(
+            "Vehicle orientation class ids collide with background/ignore ids: "
+            f"{collisions}"
+        )
+    return mapping
 
 
 def build_vehicle_orientation_classifier(checkpoint_path: str | Path, *, device: str) -> Any:
