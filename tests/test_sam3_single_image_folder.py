@@ -64,6 +64,98 @@ def test_build_semantic_outputs_keeps_highest_score():
     assert counts == {"TRUCK_BUS": 1, "CAR": 1}
 
 
+def test_overlay_instances_exclude_filtered_and_fully_covered_objects():
+    script = load_script()
+    mask = np.ones((2, 2), dtype=bool)
+    instances = [
+        script.Sam3Instance(label="CAR", class_id=2, prompt="car", score=0.90, mask=mask),
+        script.Sam3Instance(label="TRUCK_BUS", class_id=1, prompt="truck", score=0.80, mask=mask),
+        script.Sam3Instance(
+            label="arrestor",
+            class_id=4,
+            prompt="arrestor too high",
+            score=0.99,
+            mask=mask,
+            box=np.asarray([0.1, 0.1, 0.6, 0.2], dtype=np.float32),
+        ),
+        script.Sam3Instance(
+            label="arrestor",
+            class_id=4,
+            prompt="arrestor too large",
+            score=0.98,
+            mask=mask,
+            box=np.asarray([0.0, 0.5, 0.9, 0.22], dtype=np.float32),
+        ),
+    ]
+
+    outputs = script.compose_semantic_outputs(
+        instances=instances,
+        label_to_id={"TRUCK_BUS": 1, "CAR": 2, "arrestor": 4},
+        shape=(2, 2),
+        min_mask_size=1,
+    )
+
+    assert np.all(outputs.semantic_mask == 2)
+    assert [item.label for item in outputs.overlay_instances] == ["CAR"]
+    assert np.count_nonzero(outputs.overlay_instances[0].mask) == 4
+
+
+def test_overlay_instances_keep_only_pixels_owned_after_overlap_resolution():
+    script = load_script()
+    high_mask = np.asarray([[True, True], [False, False]], dtype=bool)
+    low_mask = np.asarray([[False, True], [False, True]], dtype=bool)
+    outputs = script.compose_semantic_outputs(
+        instances=[
+            script.Sam3Instance(label="CAR", class_id=2, prompt="car", score=0.9, mask=high_mask),
+            script.Sam3Instance(label="TRUCK_BUS", class_id=1, prompt="truck", score=0.8, mask=low_mask),
+        ],
+        label_to_id={"TRUCK_BUS": 1, "CAR": 2},
+        shape=(2, 2),
+        min_mask_size=1,
+    )
+
+    assert len(outputs.overlay_instances) == 2
+    np.testing.assert_array_equal(
+        outputs.overlay_instances[0].mask,
+        np.asarray([[True, True], [False, False]], dtype=bool),
+    )
+    np.testing.assert_array_equal(
+        outputs.overlay_instances[1].mask,
+        np.asarray([[False, False], [False, True]], dtype=bool),
+    )
+
+
+def test_classes_log_contains_only_final_overlay_instances(tmp_path: Path):
+    script = load_script()
+    visible = script.Sam3Instance(
+        label="CAR",
+        class_id=2,
+        prompt="car",
+        score=0.9,
+        mask=np.asarray([[True, False], [True, False]], dtype=bool),
+    )
+    result = script.ImageResult(
+        image_path=tmp_path / "000001.jpg",
+        output_dir=tmp_path / "000001",
+        image_size=(2, 2),
+        instances=3,
+        class_pixel_counts={"CAR": 2},
+        overlay_instances=(visible,),
+    )
+
+    payload = script.build_classes_log(
+        result=result,
+        prompt_config=tmp_path / "prompts.yaml",
+        min_score=0.45,
+        processing_time_seconds=1.23456789,
+    )
+
+    assert payload["object_count"] == 1
+    assert payload["class_list"] == ["CAR"]
+    assert payload["instances"][0]["label"] == "CAR"
+    assert payload["instances"][0]["visible_pixel_count"] == 2
+
+
 def test_priority_mask_overrides_higher_score_normal_mask():
     script = load_script()
     mask = np.ones((2, 2), dtype=bool)

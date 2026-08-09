@@ -79,6 +79,7 @@ class ImageResult:
     image_size: tuple[int, int]
     instances: int
     class_pixel_counts: dict[str, int]
+    overlay_instances: tuple[Sam3Instance, ...] = ()
     orientation_predictions: tuple[dict[str, Any], ...] = ()
     projection_path: str | None = None
     projection_copy_path: str | None = None
@@ -201,7 +202,11 @@ def main() -> None:
     results = []
     for index, image_path in enumerate(image_paths, start=1):
         frame_out = output_dir_for_image(out_dir, image_dir, image_path, recursive=args.recursive)
-        if outputs_exist(frame_out, projection_enabled=projection_dir is not None) and not args.overwrite:
+        if outputs_exist(
+            frame_out,
+            projection_enabled=projection_dir is not None,
+            classes_log_enabled=args.log_json,
+        ) and not args.overwrite:
             projection_info = maybe_save_existing_mask_projection(
                 image_path=image_path,
                 frame_out=frame_out,
@@ -262,6 +267,7 @@ def main() -> None:
             "min_mask_size": int(args.min_mask_size),
             "mask_nms_iou": float(args.vehicle_orientation_nms_iou),
             "instances": result.instances,
+            "overlay_instances": len(result.overlay_instances),
             "class_pixel_counts": result.class_pixel_counts,
             "projection_dir": str(projection_dir) if projection_dir is not None else None,
             "projection_path": result.projection_path,
@@ -283,6 +289,17 @@ def main() -> None:
             },
         }
         (frame_out / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        if args.log_json:
+            classes_log = build_classes_log(
+                result=result,
+                prompt_config=Path(args.prompt_config),
+                min_score=args.min_score,
+                processing_time_seconds=processing_time_seconds,
+            )
+            (frame_out / "classes_log.json").write_text(
+                json.dumps(classes_log, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         if args.validate:
             validate_outputs(frame_out)
         results.append(
@@ -435,7 +452,7 @@ def process_image(
             min_mask_size=min_mask_size,
         )
 
-    semantic_mask, confidence, class_pixel_counts = build_semantic_outputs(
+    semantic_outputs = compose_semantic_outputs(
         instances=instances,
         label_to_id=label_to_id,
         shape=(height, width),
@@ -446,8 +463,9 @@ def process_image(
         image_path=image_path,
         output_dir=output_dir,
         instances=instances,
-        semantic_mask=semantic_mask,
-        confidence=confidence,
+        overlay_instances=list(semantic_outputs.overlay_instances),
+        semantic_mask=semantic_outputs.semantic_mask,
+        confidence=semantic_outputs.confidence,
         projection_dir=projection_dir,
         projection_stem_suffixes=projection_stem_suffixes,
         require_projection=require_projection,
@@ -457,7 +475,8 @@ def process_image(
         output_dir=output_dir,
         image_size=(width, height),
         instances=len(instances),
-        class_pixel_counts=class_pixel_counts,
+        class_pixel_counts=semantic_outputs.class_pixel_counts,
+        overlay_instances=semantic_outputs.overlay_instances,
         orientation_predictions=tuple(
             instance_orientation_metadata(item)
             for item in instances
@@ -675,6 +694,14 @@ def instance_orientation_metadata(item: Sam3Instance) -> dict[str, Any]:
     }
 
 
+@dataclass(frozen=True)
+class SemanticOutputs:
+    semantic_mask: np.ndarray
+    confidence: np.ndarray
+    class_pixel_counts: dict[str, int]
+    overlay_instances: tuple[Sam3Instance, ...]
+
+
 def build_semantic_outputs(
     *,
     instances: list[Sam3Instance],
@@ -682,6 +709,22 @@ def build_semantic_outputs(
     shape: tuple[int, int],
     min_mask_size: int,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
+    outputs = compose_semantic_outputs(
+        instances=instances,
+        label_to_id=label_to_id,
+        shape=shape,
+        min_mask_size=min_mask_size,
+    )
+    return outputs.semantic_mask, outputs.confidence, outputs.class_pixel_counts
+
+
+def compose_semantic_outputs(
+    *,
+    instances: list[Sam3Instance],
+    label_to_id: dict[str, int],
+    shape: tuple[int, int],
+    min_mask_size: int,
+) -> SemanticOutputs:
     height, width = shape
     if min_mask_size < 0:
         raise ValueError(f"min_mask_size must be non-negative, got {min_mask_size}")
@@ -689,15 +732,16 @@ def build_semantic_outputs(
     semantic_mask = np.zeros((height, width), dtype=np.uint16)
     confidence = np.zeros((height, width), dtype=np.float32)
     priority_owner = np.zeros((height, width), dtype=bool)
+    instance_owner = np.full((height, width), -1, dtype=np.int32)
 
     ordered_instances = sorted(
-        instances,
-        key=lambda item: (
-            item.label not in HIGH_PRIORITY_LABELS,
-            -float(item.score),
+        enumerate(instances),
+        key=lambda indexed_item: (
+            indexed_item[1].label not in HIGH_PRIORITY_LABELS,
+            -float(indexed_item[1].score),
         ),
     )
-    for item in ordered_instances:
+    for instance_index, item in ordered_instances:
         item_score = float(item.score)
         if not np.isfinite(item_score):
             continue
@@ -725,6 +769,7 @@ def build_semantic_outputs(
             continue
         semantic_mask[accept] = np.uint16(item.class_id)
         confidence[accept] = np.float32(item_score)
+        instance_owner[accept] = np.int32(instance_index)
         if is_priority:
             priority_owner[accept] = True
 
@@ -733,7 +778,20 @@ def build_semantic_outputs(
         count = int(np.count_nonzero(semantic_mask == class_id))
         if count > 0 and count >= min_mask_size:
             class_pixel_counts[label] = count
-    return semantic_mask, confidence, class_pixel_counts
+
+    overlay_instances = []
+    for instance_index, item in enumerate(instances):
+        visible_mask = instance_owner == instance_index
+        if np.count_nonzero(visible_mask) < min_mask_size:
+            continue
+        overlay_instances.append(replace(item, mask=visible_mask))
+
+    return SemanticOutputs(
+        semantic_mask=semantic_mask,
+        confidence=confidence,
+        class_pixel_counts=class_pixel_counts,
+        overlay_instances=tuple(overlay_instances),
+    )
 
 
 def reject_instance_by_geometry(
@@ -840,6 +898,7 @@ def save_image_outputs(
     image_path: Path,
     output_dir: Path,
     instances: list[Sam3Instance],
+    overlay_instances: list[Sam3Instance] | None = None,
     semantic_mask: np.ndarray,
     confidence: np.ndarray,
     projection_dir: Path | None = None,
@@ -854,7 +913,8 @@ def save_image_outputs(
     save_instances_npz(output_dir / "instances.npz", instances, shape=semantic_mask.shape)
 
     image_np = np.asarray(image, dtype=np.uint8)
-    overlay = make_overlay(image_np, semantic_mask, instances=instances, confidence=confidence)
+    visible_instances = instances if overlay_instances is None else overlay_instances
+    overlay = make_overlay(image_np, semantic_mask, instances=visible_instances, confidence=confidence)
     semantic_color = make_semantic_color(semantic_mask)
     Image.fromarray(overlay).save(output_dir / "overlay.jpg", quality=95)
     Image.fromarray(semantic_color).save(output_dir / "semantic_color.png")
@@ -871,28 +931,63 @@ def save_image_outputs(
     )
     image.save(output_dir / "image.jpg", quality=95)
 
-    instances_json = [
-        {
-            "label": item.label,
-            "class_id": item.class_id,
-            "prompt": item.prompt,
-            "score": item.score,
-            "box": None if item.box is None else np.asarray(item.box, dtype=np.float32).tolist(),
-            "source_label": item.source_label,
-            "orientation_label": item.orientation_label,
-            "orientation_score": item.orientation_score,
-            "orientation_margin": item.orientation_margin,
-            "orientation_probabilities": None
-            if item.orientation_probabilities is None
-            else list(item.orientation_probabilities),
-            "orientation_fallback": item.orientation_fallback,
-            "orientation_fallback_reason": item.orientation_fallback_reason,
-        }
-        for item in instances
-    ]
+    instances_json = [instance_to_json(item) for item in instances]
     (output_dir / "instances.json").write_text(json.dumps(instances_json, ensure_ascii=False, indent=2), encoding="utf-8")
     (output_dir / "source_image.txt").write_text(str(image_path), encoding="utf-8")
     return projection_info
+
+
+def instance_to_json(
+    item: Sam3Instance,
+    *,
+    visible_pixel_count: int | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "label": item.label,
+        "class_id": int(item.class_id),
+        "prompt": item.prompt,
+        "score": float(item.score),
+        "box": None if item.box is None else np.asarray(item.box, dtype=np.float32).tolist(),
+        "source_label": item.source_label,
+        "orientation_label": item.orientation_label,
+        "orientation_score": item.orientation_score,
+        "orientation_margin": item.orientation_margin,
+        "orientation_probabilities": None
+        if item.orientation_probabilities is None
+        else list(item.orientation_probabilities),
+        "orientation_fallback": bool(item.orientation_fallback),
+        "orientation_fallback_reason": item.orientation_fallback_reason,
+    }
+    if visible_pixel_count is not None:
+        payload["visible_pixel_count"] = int(visible_pixel_count)
+    return payload
+
+
+def build_classes_log(
+    *,
+    result: ImageResult,
+    prompt_config: Path,
+    min_score: float,
+    processing_time_seconds: float,
+) -> dict[str, Any]:
+    visible_instances = [
+        instance_to_json(
+            item,
+            visible_pixel_count=int(np.count_nonzero(item.mask)),
+        )
+        for item in result.overlay_instances
+    ]
+    return {
+        "version": 2,
+        "image_path": str(result.image_path),
+        "prompt_config": str(prompt_config),
+        "min_score": float(min_score),
+        "object_count": len(visible_instances),
+        "class_list": list(result.class_pixel_counts),
+        "class_pixel_counts": result.class_pixel_counts,
+        "instances": visible_instances,
+        "processing_time_seconds": round(processing_time_seconds, 6),
+    }
 
 
 def maybe_save_existing_mask_projection(
@@ -1297,7 +1392,12 @@ def output_dir_for_image(out_dir: Path, image_dir: Path, image_path: Path, *, re
     return out_dir / rel.with_suffix("")
 
 
-def outputs_exist(frame_out: Path, *, projection_enabled: bool = False) -> bool:
+def outputs_exist(
+    frame_out: Path,
+    *,
+    projection_enabled: bool = False,
+    classes_log_enabled: bool = False,
+) -> bool:
     required = [
         frame_out / "semantic_mask.npy",
         frame_out / "confidence.npy",
@@ -1307,6 +1407,8 @@ def outputs_exist(frame_out: Path, *, projection_enabled: bool = False) -> bool:
     ]
     if projection_enabled:
         required.extend([frame_out / "projection.jpg", frame_out / "mask_projection.jpg"])
+    if classes_log_enabled:
+        required.append(frame_out / "classes_log.json")
     return all(path.is_file() for path in required)
 
 
@@ -1560,6 +1662,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--use-fa3", action="store_true", help="Enable FlashAttention 3. Disabled by default.")
     parser.add_argument("--prompt-log", action="store_true", help="Print every prompt for every image.")
+    parser.add_argument(
+        "--log-json",
+        action="store_true",
+        help="Save classes_log.json with only instances that remain visible on the final overlay.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--validate", action="store_true")
     return parser.parse_args()

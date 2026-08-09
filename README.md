@@ -114,6 +114,11 @@ keyed by the exact semantic label and defines `min_y_bottom` and
 `[x, y, width, height]` is too small or too large. Labels absent from a table
 bypass that filter.
 
+Use `--log-json` to save `classes_log.json` for every frame. Its `instances`
+array contains only objects that own pixels in the final overlay after geometry,
+size, priority, confidence, and overlap filtering. Each entry includes
+`visible_pixel_count` for the final non-overlapped mask fragment.
+
 The positive whitelist intentionally avoids the broad `vehicle` prompt because it also covers bicycles and motorcycles. The runner deduplicates the car/truck/bus masks before one batched classifier call per image. Orientation probabilities, confidence, margin, and fallback reason are saved in `instances.npz`, `instances.json`, and frame metadata. Both `license_plate_and_taillights` and the older `license_plate&taillights` spelling remain priority labels and cannot be overwritten by the vehicle mask.
 
 For video-context SAM3 runs, use `scripts/run_sam3_video_teacher.py`. The main environment does not import SAM3 directly; SAM3 should run through its own Conda environment.
