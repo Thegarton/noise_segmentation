@@ -88,39 +88,52 @@ def test_overlay_instances_exclude_filtered_and_fully_covered_objects():
         ),
     ]
 
-    outputs = script.compose_semantic_outputs(
+    semantic, confidence, _ = script.build_semantic_outputs(
         instances=instances,
         label_to_id={"TRUCK_BUS": 1, "CAR": 2, "arrestor": 4},
         shape=(2, 2),
         min_mask_size=1,
     )
+    visible = script.collect_overlay_instances(
+        instances=instances,
+        semantic_mask=semantic,
+        confidence=confidence,
+        min_mask_size=1,
+    )
 
-    assert np.all(outputs.semantic_mask == 2)
-    assert [item.label for item in outputs.overlay_instances] == ["CAR"]
-    assert np.count_nonzero(outputs.overlay_instances[0].mask) == 4
+    assert np.all(semantic == 2)
+    assert [item.label for item in visible] == ["CAR"]
+    assert np.count_nonzero(visible[0].mask) == 4
 
 
 def test_overlay_instances_keep_only_pixels_owned_after_overlap_resolution():
     script = load_script()
     high_mask = np.asarray([[True, True], [False, False]], dtype=bool)
     low_mask = np.asarray([[False, True], [False, True]], dtype=bool)
-    outputs = script.compose_semantic_outputs(
-        instances=[
-            script.Sam3Instance(label="CAR", class_id=2, prompt="car", score=0.9, mask=high_mask),
-            script.Sam3Instance(label="TRUCK_BUS", class_id=1, prompt="truck", score=0.8, mask=low_mask),
-        ],
+    instances = [
+        script.Sam3Instance(label="CAR", class_id=2, prompt="car", score=0.9, mask=high_mask),
+        script.Sam3Instance(label="TRUCK_BUS", class_id=1, prompt="truck", score=0.8, mask=low_mask),
+    ]
+    semantic, confidence, _ = script.build_semantic_outputs(
+        instances=instances,
         label_to_id={"TRUCK_BUS": 1, "CAR": 2},
         shape=(2, 2),
         min_mask_size=1,
     )
+    visible = script.collect_overlay_instances(
+        instances=instances,
+        semantic_mask=semantic,
+        confidence=confidence,
+        min_mask_size=1,
+    )
 
-    assert len(outputs.overlay_instances) == 2
+    assert len(visible) == 2
     np.testing.assert_array_equal(
-        outputs.overlay_instances[0].mask,
+        visible[0].mask,
         np.asarray([[True, True], [False, False]], dtype=bool),
     )
     np.testing.assert_array_equal(
-        outputs.overlay_instances[1].mask,
+        visible[1].mask,
         np.asarray([[False, False], [False, True]], dtype=bool),
     )
 
@@ -138,7 +151,7 @@ def test_classes_log_contains_only_final_overlay_instances(tmp_path: Path):
         image_path=tmp_path / "000001.jpg",
         output_dir=tmp_path / "000001",
         image_size=(2, 2),
-        instances=3,
+        instances=[],
         class_pixel_counts={"CAR": 2},
         overlay_instances=(visible,),
     )
@@ -160,24 +173,25 @@ def test_priority_mask_overrides_higher_score_normal_mask():
     script = load_script()
     mask = np.ones((2, 2), dtype=bool)
     instances = [
-        script.Sam3Instance(label="CAR", class_id=2, prompt="car", score=0.95, mask=mask),
+        script.Sam3Instance(label="epoxy_floor", class_id=11, prompt="floor", score=0.95, mask=mask),
         script.Sam3Instance(
             label="ground_markings",
-            class_id=7,
+            class_id=25,
             prompt="road marking",
             score=0.60,
             mask=mask,
+            box=np.asarray([0.0, 0.4, 0.8, 0.2], dtype=np.float32),
         ),
     ]
 
     semantic, confidence, counts = script.build_semantic_outputs(
         instances=instances,
-        label_to_id={"CAR": 2, "ground_markings": 7},
+        label_to_id={"epoxy_floor": 11, "ground_markings": 25},
         shape=(2, 2),
         min_mask_size=1,
     )
 
-    assert np.all(semantic == 7)
+    assert np.all(semantic == 25)
     assert np.all(confidence == np.float32(0.60))
     assert counts == {"ground_markings": 4}
 
@@ -212,21 +226,21 @@ def test_highest_score_wins_between_priority_masks():
     assert np.all(semantic == 8)
 
 
-def test_canonical_license_plate_label_is_also_priority():
+def test_server_license_plate_alias_overrides_vehicle():
     script = load_script()
     mask = np.ones((2, 2), dtype=bool)
     semantic, _, _ = script.build_semantic_outputs(
         instances=[
-            script.Sam3Instance(label="front_of_vehicle", class_id=9, prompt="vehicle", score=0.99, mask=mask),
+            script.Sam3Instance(label="vehicle", class_id=9, prompt="vehicle", score=0.99, mask=mask),
             script.Sam3Instance(
-                label="license_plate_and_taillights",
+                label="license_plate&taillights",
                 class_id=18,
                 prompt="license plate",
                 score=0.60,
                 mask=mask,
             ),
         ],
-        label_to_id={"front_of_vehicle": 9, "license_plate_and_taillights": 18},
+        label_to_id={"vehicle": 9, "license_plate&taillights": 18},
         shape=(2, 2),
         min_mask_size=1,
     )
@@ -419,7 +433,7 @@ def test_arrestor_geometry_uses_normalized_xywh_and_handles_missing_box():
         prompt="arrestor",
         score=0.9,
         mask=mask,
-        box=np.asarray([0.1, 0.2, 0.6, 0.2], dtype=np.float32),
+        box=np.asarray([0.1, 0.1, 0.6, 0.2], dtype=np.float32),
     )
     rejected_narrow = script.Sam3Instance(
         label="arrestor",
@@ -505,7 +519,10 @@ def test_arrestor_rejects_oversized_box_and_keeps_real_example():
         ),
     )
 
-    assert float(oversized.box[2] * oversized.box[3]) > script.ARRESTOR_MAX_BOX_AREA
+    assert (
+        float(oversized.box[2] * oversized.box[3])
+        > script.SIZE_FILTER_RULES["arrestor"]["max_box_area"]
+    )
     assert not script.reject_instance_by_geometry(oversized)
     assert script.reject_instance_by_size(oversized)
     assert not script.reject_instance_by_geometry(correct)
@@ -677,7 +694,8 @@ def test_save_mask_projection_preview(tmp_path: Path):
     )
 
     assert Path(info["projection_path"]).name == "000000.jpg"
-    assert Path(info["projection_copy"]).is_file()
+    assert Path(info["projection_copy"]).name == "projection.jpg"
+    assert not Path(info["projection_copy"]).is_file()
     assert Path(info["mask_projection"]).is_file()
     assert info["projection_error"] is None
 
@@ -690,7 +708,11 @@ def test_outputs_exist_requires_projection_outputs_when_enabled(tmp_path: Path):
         (frame_out / filename).write_bytes(b"")
 
     assert script.outputs_exist(frame_out)
+    assert not script.outputs_exist(frame_out, classes_log_enabled=True)
     assert not script.outputs_exist(frame_out, projection_enabled=True)
+
+    (frame_out / "classes_log.json").write_bytes(b"")
+    assert script.outputs_exist(frame_out, classes_log_enabled=True)
 
     (frame_out / "projection.jpg").write_bytes(b"")
     (frame_out / "mask_projection.jpg").write_bytes(b"")
