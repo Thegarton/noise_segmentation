@@ -65,6 +65,26 @@ traffic_sign: 0.45
 
 Label names must exactly match the top-level keys in the active prompt config. Per-label thresholds and the effective fallback-expanded table are saved in every frame's `metadata.json` and in the run manifest. Use `--overwrite` or a new output directory when changing thresholds, otherwise existing predictions are kept.
 
+For independent image inference on four Tesla T4 cards, run the full wrapper with one process per GPU:
+
+```bash
+PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
+  python scripts/run_full_sam3_masking.py \
+  --skip-conversion \
+  --image-dir /path/to/prepared_images \
+  --out-dir ./output/sam3_single_image_folder \
+  --prompt-config configs/sam3_text_prompts_pointwise_v1.yaml \
+  --classes-yaml configs/classes_pointwise_v1.yaml \
+  --sam3-root /home/a60116606/git_repo/sam3 \
+  --sam3-model-path /home/a60116606/git_repo/sam3/sam3.1 \
+  --gpu-ids 0,1,2,3 \
+  --inference-precision auto \
+  --cache-visual-features \
+  --overwrite
+```
+
+Preprocessing runs once in the parent process; sorted images are split between workers without overlap. On T4, `auto` selects FP16 because T4 has no native BF16 execution. Do not enable `--use-fa3` on T4. Each worker writes its own manifest, and the parent merges them into `sam3_single_image_folder_manifest.json` after all workers finish. `--cache-visual-features` reuses the image backbone output between text prompts while still running text-conditioned detection and mask prediction for every prompt.
+
 ### Vehicle front/rear classifier
 
 The standalone [`vehicle_orientation`](vehicle_orientation/README.md) project accepts one mixed camera-image folder, uses SAM3 to cut out every car and roughly sort crops into `review/front`, `review/rear`, and `review/side`, then rebuilds labels after manual file moves. It trains an ImageNet-pretrained EfficientNet-B0 on the reviewed `front/rear/side` dataset and optionally routes car masks to `front_of_vehicle`, `rear_of_vehicle`, or `side_of_vehicle` inside the folder runner. The output ids are read from the active classes YAML. Install it in the SAM3 environment and pass `--vehicle-orientation-checkpoint`; without that flag, the existing SAM3 behavior is unchanged.
@@ -96,6 +116,16 @@ side_of_vehicle:
 
 `--sam3-only` overrides `--vehicle-orientation-checkpoint`, so EfficientNet is
 not loaded even if a wrapper also supplies a checkpoint.
+
+### Sign-type review dataset
+
+The standalone [`sign_type_classifier`](sign_type_classifier/README.md) project
+builds a manually reviewable dataset for six similar roadside, overhead, and
+underground sign types. It accepts already prepared images, loads SAM3 once,
+clusters duplicate masks across class-specific prompts, and auto-sorts every
+candidate into class folders. Context crops, full-image position, all SAM3
+scores, and numeric appearance features are retained for a later CPU/image
+classifier ensemble. This stage does not train or load another classifier.
 
 After all prompts have run, masks are deduplicated independently for every
 label. For masks of the same label, the highest-confidence mask is kept and

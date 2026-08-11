@@ -23,6 +23,20 @@ def test_collect_images_non_recursive_sorted(tmp_path: Path):
     assert [path.name for path in images] == ["a.jpg", "b.png"]
 
 
+def test_shard_image_paths_distributes_sorted_input_without_overlap():
+    script = load_script()
+    paths = [Path(f"{index:06d}.jpg") for index in range(10)]
+
+    shards = [
+        script.shard_image_paths(paths, worker_index=index, num_workers=4)
+        for index in range(4)
+    ]
+
+    assert shards[0] == [paths[0], paths[4], paths[8]]
+    assert shards[1] == [paths[1], paths[5], paths[9]]
+    assert sorted(path for shard in shards for path in shard) == paths
+
+
 def test_extract_arrays_accepts_sam3_31_output_keys():
     script = load_script()
     outputs = {

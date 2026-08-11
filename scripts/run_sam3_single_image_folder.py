@@ -19,6 +19,11 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from autolabeler.data.class_config import load_semantic_classes  # noqa: E402
+from autolabeler.teachers.sam3_runtime_adapter import (  # noqa: E402
+    clear_visual_feature_cache,
+    configure_sam3_runtime,
+    sam3_runtime_summary,
+)
 
 def _strip_quotes(value: str) -> str:
     if len(value) >= 2 and value[0] in {"'", '"'} and value[-1] == value[0]:
@@ -109,6 +114,7 @@ def process_image(
 
     image = Image.open(image_path).convert("RGB")
     width, height = image.size
+    clear_visual_feature_cache(predictor)
     session_id = start_session(predictor, image_path)
     instances: list[Sam3Instance] = []
     try:
@@ -116,8 +122,6 @@ def process_image(
             detection_min_score = float(label_min_scores.get(label, min_score))
             if prompt_log:
                 print(f"  [{prompt_idx:03d}/{len(flat_prompts):03d}] {label}: {prompt}", file=sys.stderr, flush=True)
-            reset_session(predictor, session_id)
-
             set_predictor_detection_threshold(predictor, detection_min_score)
 
             response = add_text_prompt(
@@ -153,6 +157,7 @@ def process_image(
                     )
                 )
     finally:
+        clear_visual_feature_cache(predictor)
         close_session(predictor, session_id)
 
     instances = deduplicate_instances_by_label(
@@ -1284,7 +1289,14 @@ def resolve_model_dir(*, sam3_root: Path | None, sam3_model_path: str | None) ->
     return model_dir
 
 
-def build_predictor(*, model_dir: Path | None, use_fa3: bool, min_score: float) -> Any:
+def build_predictor(
+    *,
+    model_dir: Path | None,
+    use_fa3: bool,
+    min_score: float,
+    inference_precision: str = "auto",
+    cache_visual_features: bool = False,
+) -> Any:
     import sam3.model_builder as sam3_model_builder  # type: ignore # noqa: WPS433
 
     builder = sam3_model_builder.build_sam3_multiplex_video_predictor
@@ -1300,6 +1312,20 @@ def build_predictor(*, model_dir: Path | None, use_fa3: bool, min_score: float) 
     params = inspect.signature(builder).parameters
     predictor = builder(**{key: value for key, value in kwargs.items() if key in params})
     set_predictor_detection_threshold(predictor, min_score)
+    precision = configure_sam3_runtime(
+        predictor,
+        requested_precision=inference_precision,
+        cache_visual_features=cache_visual_features,
+        use_fa3=use_fa3,
+    )
+    print(
+        "SAM3 runtime: "
+        f"device={precision.device_name}, precision={precision.effective}, "
+        f"visual_cache={'on' if cache_visual_features else 'off'} "
+        f"({precision.reason})",
+        file=sys.stderr,
+        flush=True,
+    )
     return predictor
 
 
@@ -1427,6 +1453,21 @@ def make_class_list(class_pixel_counts):
     return list(class_pixel_counts.keys())
 
 
+def shard_image_paths(
+    image_paths: list[Path],
+    *,
+    worker_index: int,
+    num_workers: int,
+) -> list[Path]:
+    if num_workers <= 0:
+        raise ValueError(f"num_workers must be positive, got {num_workers}")
+    if worker_index < 0 or worker_index >= num_workers:
+        raise ValueError(
+            f"worker_index must be in [0, {num_workers}), got {worker_index}"
+        )
+    return image_paths[worker_index::num_workers]
+
+
 def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
                              sam3_root, sam3_model_path, min_score, projection_dir, label_min_scores = None,
                              recursive = None , max_images = None, max_prompts = None,
@@ -1435,7 +1476,9 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
                              vehicle_orientation_checkpoint = None, vehicle_orientation_device = "auto",
                              vehicle_orientation_min_confidence = 0.75, vehicle_orientation_min_margin = 0.10,
                              vehicle_orientation_nms_iou = 0.80, vehicle_prompt_label = "vehicle",
-                             sam3_only = False
+                             sam3_only = False, prompt_log = False,
+                             inference_precision = "auto", cache_visual_features = False,
+                             worker_index = 0, num_workers = 1
                              ) -> None:
 
 
@@ -1455,8 +1498,15 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         if max_images <= 0:
             raise ValueError(f"--max-images must be positive, got {max_images}")
         image_paths = image_paths[: max_images]
+    image_paths = shard_image_paths(
+        image_paths,
+        worker_index=int(worker_index),
+        num_workers=int(num_workers),
+    )
     if not image_paths:
-        raise ValueError(f"No images found in {image_dir}")
+        raise ValueError(
+            f"Worker {worker_index}/{num_workers} received no images from {image_dir}"
+        )
 
     prompts_by_label = load_prompt_config(prompt_config)
     class_to_id = load_semantic_classes(classes_yaml)
@@ -1525,6 +1575,11 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         if label in active_prompt_labels
     ]
 
+    if max_prompts is not None:
+        if max_prompts <= 0:
+            raise ValueError(f"--max-prompts must be positive, got {max_prompts}")
+        flat_prompts = flat_prompts[: max_prompts]
+
     print("routed_prompt_labels:", routed_prompt_labels)
     print("active_prompt_labels:", active_prompt_labels)
     print("flat_prompts:", flat_prompts)
@@ -1550,7 +1605,13 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         for label in active_prompt_labels
     }
 
-    predictor = build_predictor(model_dir=model_dir, use_fa3=use_fa3, min_score=min_score)
+    predictor = build_predictor(
+        model_dir=model_dir,
+        use_fa3=use_fa3,
+        min_score=min_score,
+        inference_precision=inference_precision,
+        cache_visual_features=cache_visual_features,
+    )
 
     results = []
     for index, image_path in enumerate(image_paths, start=1):
@@ -1580,7 +1641,12 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             )
             continue
 
-        print(f"[{index:04d}/{len(image_paths):04d}] {image_path}", file=sys.stderr, flush=True)
+        worker_prefix = f"[worker {worker_index + 1}/{num_workers}] " if num_workers > 1 else ""
+        print(
+            f"{worker_prefix}[{index:04d}/{len(image_paths):04d}] {image_path}",
+            file=sys.stderr,
+            flush=True,
+        )
         frame_started_at =time.perf_counter()
         result = process_image(
             predictor=predictor,
@@ -1590,7 +1656,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             label_to_id=label_to_id,
             label_min_scores=effective_label_min_scores,
             min_score=min_score,
-            prompt_log=False,
+            prompt_log=prompt_log,
             projection_dir=projection_dir,
             min_mask_size=min_mask_size,
             require_projection=require_projection,
@@ -1625,6 +1691,12 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             "projection_error": result.projection_error,
             "mask_nms_iou": float(vehicle_orientation_nms_iou),
             "processing_time_seconds": round(processing_time_seconds, 6),
+            "sam3_runtime": sam3_runtime_summary(predictor),
+            "worker": {
+                "index": int(worker_index),
+                "count": int(num_workers),
+                "physical_gpu_id": os.environ.get("SAM3_PHYSICAL_GPU_ID"),
+            },
             "vehicle_orientation": {
                 "enabled": vehicle_orientation_classifier is not None,
                  "mode": vehicle_orientation_mode,
@@ -1685,6 +1757,12 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         "mask_nms_iou": float(vehicle_orientation_nms_iou),
         "labels": label_to_id,
         "frames": results,
+        "sam3_runtime": sam3_runtime_summary(predictor),
+        "worker": {
+            "index": int(worker_index),
+            "count": int(num_workers),
+            "physical_gpu_id": os.environ.get("SAM3_PHYSICAL_GPU_ID"),
+        },
         "vehicle_orientation": {
             "enabled": vehicle_orientation_classifier is not None,
             "mode": vehicle_orientation_mode,
@@ -1703,6 +1781,11 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             },
         },
     }
-    manifest_path = out_dir / "sam3_single_image_folder_manifest.json"
+    manifest_name = (
+        "sam3_single_image_folder_manifest.json"
+        if num_workers == 1
+        else f"sam3_single_image_folder_manifest.worker_{worker_index:03d}.json"
+    )
+    manifest_path = out_dir / manifest_name
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"images": len(image_paths), "manifest": str(manifest_path)}, indent=2))

@@ -1,0 +1,25 @@
+height_restriction_sign_at_underground:
+  - "garage entrance clearance height sign"
+  - "overhead vehicle clearance limit sign"
+  - "parking garage height clearance board"
+  - "height limit sign with meter value"
+  - "red circular vehicle height limit sign"
+height_restriction_barrel:
+  - "overhead height restriction bar"
+  - "parking clearance bar"
+  - "height limit barrier beam"
+underground_parking_sign:
+  - "ceiling-suspended rectangular parking garage wayfinding sign with arrows and zone labels"
+  - "hanging indoor parking direction board above a driving lane"
+overhead_traffic_sign:
+  - "large overhead road direction sign mounted on a gantry above traffic lanes"
+  - "elevated highway guide sign with road names, route information and multiple arrows"
+side_plate:
+  - "roadside traffic sign"
+  - "pole mounted road sign"
+  - "side street sign"
+induction_sign:
+  - "blue rectangular chevron alignment sign with one large white angled stripe"
+  - "rectangular chevron alignment sign with one large white angled stripe"
+  - "roadside curve delineation board with a bold white chevron"
+  - "repeated roadside chevron signs marking a road bend"
