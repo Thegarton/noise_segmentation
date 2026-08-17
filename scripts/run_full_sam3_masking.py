@@ -5,12 +5,9 @@ import argparse
 import csv
 import json
 import os
-import subprocess
 import sys
-import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
 
 from run_sam3_single_image_folder import collect_images, sam3_single_image_folder
 
@@ -30,7 +27,7 @@ class MatchedFrame:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Prepare HL320 images and run SAM3.1 on one or more GPUs."
+        description="Prepare HL320 images and run SAM3.1 on one selected GPU."
     )
     parser.add_argument("-i", "--folder_path", help="Path to the folder with source .bin files.")
     parser.add_argument("-I", "--image-folder-path", help="Path used by image-only conversion.")
@@ -110,11 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sam3-only", action="store_true")
 
     parser.add_argument(
-        "--gpu-ids",
+        "--gpu-id",
+        type=int,
         default=None,
         help=(
-            "Comma-separated physical GPU ids, for example 0,1,2,3. Each GPU gets an "
-            "independent SAM3 process and a disjoint image shard."
+            "Physical GPU id for this process. Sets CUDA_VISIBLE_DEVICES before loading "
+            "SAM3; inside the process the selected card is cuda:0."
         ),
     )
     parser.add_argument(
@@ -129,22 +127,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compute the single-image visual backbone once and reuse it for all text prompts.",
     )
 
-    parser.add_argument("--worker-index", type=int, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--num-workers", type=int, default=1, help=argparse.SUPPRESS)
     return parser
 
 
-def parse_gpu_ids(value: str | None) -> list[str]:
-    if value is None:
-        return []
-    gpu_ids = [token.strip() for token in value.split(",") if token.strip()]
-    if not gpu_ids:
-        raise ValueError("--gpu-ids must contain at least one id")
-    if any(not token.isdigit() for token in gpu_ids):
-        raise ValueError(f"--gpu-ids must contain non-negative integers, got {value!r}")
-    if len(set(gpu_ids)) != len(gpu_ids):
-        raise ValueError(f"--gpu-ids contains duplicate ids: {value!r}")
-    return gpu_ids
+def configure_gpu(gpu_id: int | None) -> None:
+    if gpu_id is None:
+        return
+    if gpu_id < 0:
+        raise ValueError(f"--gpu-id must be non-negative, got {gpu_id}")
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    os.environ["SAM3_PHYSICAL_GPU_ID"] = str(gpu_id)
 
 
 def parse_delimited_rows(path: str | Path, *, columns: int) -> list[list[str]]:
@@ -327,43 +319,30 @@ def write_match_manifest(args: argparse.Namespace, matches: list[MatchedFrame]) 
     return path
 
 
-def collect_run_classes(out_dir: Path, *, frame_ids: list[str]) -> list[str]:
-    classes: list[str] = []
-    seen: set[str] = set()
-    for frame_id in frame_ids:
-        classes_log_path = out_dir / frame_id / "classes_log.json"
-        if not classes_log_path.is_file():
-            continue
-        payload = json.loads(classes_log_path.read_text(encoding="utf-8"))
-        class_list = payload.get("class_list", [])
-        if not isinstance(class_list, list):
-            raise ValueError(f"class_list must be a list in {classes_log_path}")
-        for raw_class_name in class_list:
-            class_name = str(raw_class_name)
-            if class_name not in seen:
-                seen.add(class_name)
-                classes.append(class_name)
-    return classes
-
-
 def write_run_summary_csv(
     args: argparse.Namespace,
     *,
+    detected_classes: set[str],
     matches: list[MatchedFrame] | None,
 ) -> Path:
     out_dir = Path(args.out_dir).expanduser().resolve()
-    manifest_path = out_dir / "sam3_single_image_folder_manifest.json"
-    if not manifest_path.is_file():
-        raise FileNotFoundError(f"Missing final SAM3 manifest: {manifest_path}")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    frame_ids = [str(frame["frame_id"]) for frame in manifest.get("frames", [])]
+    if matches is not None:
+        frame_ids = [match.frame_id for match in matches]
+        start_timestamp: int | str = matches[0].image_timestamp
+        end_timestamp: int | str = matches[-1].image_timestamp
+    else:
+        image_paths = collect_images(
+            Path(args.image_dir).expanduser().resolve(),
+            recursive=args.recursive,
+        )
+        if args.max_images is not None:
+            image_paths = image_paths[: args.max_images]
+        frame_ids = [image_path.stem for image_path in image_paths]
+        start_timestamp = ""
+        end_timestamp = ""
     if not frame_ids:
-        raise ValueError(f"Final SAM3 manifest contains no frames: {manifest_path}")
+        raise ValueError("Cannot write run summary because no input frames were selected")
 
-    classes = collect_run_classes(out_dir, frame_ids=frame_ids)
-    matches_by_frame = {} if matches is None else {match.frame_id: match for match in matches}
-    first_match = matches_by_frame.get(frame_ids[0])
-    last_match = matches_by_frame.get(frame_ids[-1])
     data_name = str(args.data_name).strip() if args.data_name is not None else ""
     if not data_name:
         data_name = "data_name"
@@ -386,12 +365,12 @@ def write_run_summary_csv(
         writer.writeheader()
         writer.writerow(
             {
-                "classes": json.dumps(classes, ensure_ascii=False),
+                "classes": json.dumps(sorted(detected_classes), ensure_ascii=False),
                 "data_name": data_name,
                 "start_frame": frame_ids[0],
                 "end_frame": frame_ids[-1],
-                "start_timestamp": "" if first_match is None else first_match.image_timestamp,
-                "end_timestamp": "" if last_match is None else last_match.image_timestamp,
+                "start_timestamp": start_timestamp,
+                "end_timestamp": end_timestamp,
                 "frame_num": len(frame_ids),
             }
         )
@@ -423,26 +402,8 @@ def run_conversion(args: argparse.Namespace) -> None:
         save_converted_data(args.folder_path, args.output_folder_name)
 
 
-def count_selected_images(args: argparse.Namespace) -> int:
-    matches = selected_frame_matches(args)
-    paths = (
-        [match.image_path for match in matches]
-        if matches is not None
-        else collect_images(Path(args.image_dir).expanduser().resolve(), recursive=args.recursive)
-    )
-    if args.max_images is not None:
-        if args.max_images <= 0:
-            raise ValueError(f"--max-images must be positive, got {args.max_images}")
-        paths = paths[: args.max_images]
-    if not paths:
-        raise ValueError(f"No images found in {args.image_dir}")
-    return len(paths)
-
-
-def run_sam3_worker(args: argparse.Namespace) -> None:
-    worker_index = 0 if args.worker_index is None else int(args.worker_index)
-    matches = selected_frame_matches(args)
-    sam3_single_image_folder(
+def run_sam3(args: argparse.Namespace, *, matches: list[MatchedFrame] | None) -> set[str]:
+    return sam3_single_image_folder(
         image_dir=args.image_dir,
         out_dir=args.out_dir,
         prompt_config=args.prompt_config,
@@ -471,134 +432,10 @@ def run_sam3_worker(args: argparse.Namespace) -> None:
         prompt_log=args.prompt_log,
         inference_precision=args.inference_precision,
         cache_visual_features=args.cache_visual_features,
-        worker_index=worker_index,
-        num_workers=args.num_workers,
         frame_image_pairs=None
         if matches is None
         else [(match.frame_id, match.image_path) for match in matches],
     )
-
-
-def build_worker_command(
-    original_argv: list[str],
-    *,
-    worker_index: int,
-    num_workers: int,
-) -> list[str]:
-    return [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        *original_argv,
-        "--skip-conversion",
-        "--worker-index",
-        str(worker_index),
-        "--num-workers",
-        str(num_workers),
-    ]
-
-
-def launch_gpu_workers(args: argparse.Namespace, gpu_ids: list[str], original_argv: list[str]) -> int:
-    image_count = count_selected_images(args)
-    num_workers = min(len(gpu_ids), image_count)
-    active_gpu_ids = gpu_ids[:num_workers]
-    if num_workers < len(gpu_ids):
-        print(
-            f"Using {num_workers} of {len(gpu_ids)} requested GPUs for {image_count} images",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    processes: list[tuple[int, str, subprocess.Popen[Any]]] = []
-    for worker_index, gpu_id in enumerate(active_gpu_ids):
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = gpu_id
-        env["SAM3_WORKER_INDEX"] = str(worker_index)
-        env["SAM3_NUM_WORKERS"] = str(num_workers)
-        env["SAM3_PHYSICAL_GPU_ID"] = gpu_id
-        command = build_worker_command(
-            original_argv,
-            worker_index=worker_index,
-            num_workers=num_workers,
-        )
-        print(
-            f"Starting SAM3 worker {worker_index + 1}/{num_workers} on physical GPU {gpu_id}",
-            file=sys.stderr,
-            flush=True,
-        )
-        processes.append((worker_index, gpu_id, subprocess.Popen(command, env=env)))
-
-    unfinished = list(processes)
-    failure: tuple[int, str, int] | None = None
-    while unfinished and failure is None:
-        for item in list(unfinished):
-            worker_index, gpu_id, process = item
-            return_code = process.poll()
-            if return_code is None:
-                continue
-            unfinished.remove(item)
-            if return_code != 0:
-                failure = (worker_index, gpu_id, return_code)
-                break
-        if unfinished and failure is None:
-            time.sleep(0.2)
-
-    if failure is not None:
-        for _, _, process in unfinished:
-            process.terminate()
-        for _, _, process in unfinished:
-            process.wait()
-        worker_index, gpu_id, return_code = failure
-        raise RuntimeError(
-            f"SAM3 worker {worker_index} on GPU {gpu_id} exited with code {return_code}"
-        )
-    return num_workers
-
-
-def merge_worker_manifests(out_dir: str | Path, *, num_workers: int) -> Path:
-    output_dir = Path(out_dir).expanduser().resolve()
-    manifests: list[dict[str, Any]] = []
-    worker_paths: list[Path] = []
-    for worker_index in range(num_workers):
-        path = output_dir / f"sam3_single_image_folder_manifest.worker_{worker_index:03d}.json"
-        if not path.is_file():
-            raise FileNotFoundError(f"Missing SAM3 worker manifest: {path}")
-        worker_paths.append(path)
-        manifests.append(json.loads(path.read_text(encoding="utf-8")))
-
-    combined = dict(manifests[0])
-    frames = [frame for manifest in manifests for frame in manifest.get("frames", [])]
-    frames.sort(key=lambda item: (str(item.get("frame_id", "")), str(item.get("image", ""))))
-    combined["images"] = len(frames)
-    combined["frames"] = frames
-    combined.pop("worker", None)
-    combined["workers"] = [
-        {
-            "index": index,
-            "manifest": str(path),
-            "images": int(manifest.get("images", 0)),
-            "physical_gpu_id": manifest.get("worker", {}).get("physical_gpu_id"),
-            "sam3_runtime": manifest.get("sam3_runtime"),
-        }
-        for index, (path, manifest) in enumerate(zip(worker_paths, manifests))
-    ]
-    combined["multi_gpu"] = True
-    combined["num_workers"] = num_workers
-    runtime = dict(manifests[0].get("sam3_runtime") or {})
-    runtime["visual_feature_cache_hits"] = sum(
-        int((manifest.get("sam3_runtime") or {}).get("visual_feature_cache_hits", 0))
-        for manifest in manifests
-    )
-    runtime["visual_feature_cache_misses"] = sum(
-        int((manifest.get("sam3_runtime") or {}).get("visual_feature_cache_misses", 0))
-        for manifest in manifests
-    )
-    combined["sam3_runtime"] = runtime
-
-    final_path = output_dir / "sam3_single_image_folder_manifest.json"
-    temporary_path = final_path.with_suffix(final_path.suffix + ".tmp")
-    temporary_path.write_text(json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary_path.replace(final_path)
-    return final_path
 
 
 def collect_review_images(out_dir: str | Path) -> None:
@@ -620,13 +457,9 @@ def collect_review_images(out_dir: str | Path) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
-    original_argv = list(sys.argv[1:] if argv is None else argv)
-    args = parser.parse_args(original_argv)
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
-    if args.worker_index is not None:
-        run_sam3_worker(args)
-        return
-
+    configure_gpu(args.gpu_id)
     run_conversion(args)
     matches = selected_frame_matches(args)
     if matches is not None:
@@ -642,16 +475,14 @@ def main(argv: list[str] | None = None) -> None:
                 indent=2,
             )
         )
-    gpu_ids = parse_gpu_ids(args.gpu_ids)
-    if gpu_ids:
-        num_workers = launch_gpu_workers(args, gpu_ids, original_argv)
-        manifest_path = merge_worker_manifests(args.out_dir, num_workers=num_workers)
-        print(json.dumps({"workers": num_workers, "manifest": str(manifest_path)}, indent=2))
-    else:
-        run_sam3_worker(args)
-    collect_review_images(args.out_dir)
-    summary_path = write_run_summary_csv(args, matches=matches)
+    detected_classes = run_sam3(args, matches=matches)
+    summary_path = write_run_summary_csv(
+        args,
+        detected_classes=detected_classes,
+        matches=matches,
+    )
     print(json.dumps({"run_summary": str(summary_path)}, indent=2))
+    collect_review_images(args.out_dir)
 
 
 if __name__ == "__main__":

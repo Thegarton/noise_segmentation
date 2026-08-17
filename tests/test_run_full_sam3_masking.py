@@ -4,32 +4,20 @@ import argparse
 import csv
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
-import pytest
 
-
-def test_parse_gpu_ids() -> None:
+def test_configure_gpu_selects_one_physical_device(monkeypatch) -> None:
     script = load_script()
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("SAM3_PHYSICAL_GPU_ID", raising=False)
 
-    assert script.parse_gpu_ids("0,1, 3") == ["0", "1", "3"]
-    with pytest.raises(ValueError, match="duplicate"):
-        script.parse_gpu_ids("0,0")
+    script.configure_gpu(3)
 
-
-def test_build_worker_command_keeps_original_args() -> None:
-    script = load_script()
-
-    command = script.build_worker_command(
-        ["--image-dir", "/images", "--out-dir", "/out", "--gpu-ids", "0,1"],
-        worker_index=1,
-        num_workers=2,
-    )
-
-    assert command[0] == sys.executable
-    assert command[-5:] == ["--skip-conversion", "--worker-index", "1", "--num-workers", "2"]
-    assert "0,1" in command
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"
+    assert os.environ["SAM3_PHYSICAL_GPU_ID"] == "3"
 
 
 def test_load_matched_frames_resolves_zero_based_time_map_index(tmp_path: Path) -> None:
@@ -93,21 +81,13 @@ def test_load_matched_frames_accepts_image_name_from_time_map(tmp_path: Path) ->
 
 def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -> None:
     script = load_script()
-    frames = []
     matches = []
-    for index, (frame_id, class_list, timestamp) in enumerate(
+    for index, (frame_id, timestamp) in enumerate(
         [
-            ("000080", ["epoxy_floor", "front_of_vehicle"], 1000),
-            ("000081", ["front_of_vehicle", "ground_markings"], 2000),
+            ("000080", 1000),
+            ("000081", 2000),
         ]
     ):
-        frame_dir = tmp_path / frame_id
-        frame_dir.mkdir()
-        (frame_dir / "classes_log.json").write_text(
-            json.dumps({"class_list": class_list}),
-            encoding="utf-8",
-        )
-        frames.append({"frame_id": frame_id, "image": f"/{index:06d}.jpg"})
         matches.append(
             script.MatchedFrame(
                 frame_id=frame_id,
@@ -118,13 +98,19 @@ def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -
                 diff_ms=0.0,
             )
         )
-    (tmp_path / "sam3_single_image_folder_manifest.json").write_text(
-        json.dumps({"frames": frames}),
-        encoding="utf-8",
+    args = argparse.Namespace(
+        out_dir=str(tmp_path),
+        image_dir=str(tmp_path),
+        recursive=False,
+        max_images=None,
+        data_name=None,
     )
-    args = argparse.Namespace(out_dir=str(tmp_path), data_name=None)
 
-    summary_path = script.write_run_summary_csv(args, matches=matches)
+    summary_path = script.write_run_summary_csv(
+        args,
+        detected_classes={"ground_markings", "front_of_vehicle", "epoxy_floor"},
+        matches=matches,
+    )
 
     with summary_path.open(encoding="utf-8", newline="") as stream:
         row = next(csv.DictReader(stream))
@@ -139,28 +125,6 @@ def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -
     assert row["start_timestamp"] == "1000"
     assert row["end_timestamp"] == "2000"
     assert row["frame_num"] == "2"
-
-
-def test_merge_worker_manifests_sorts_frames(tmp_path: Path) -> None:
-    script = load_script()
-    for worker_index, frame_id in [(0, "000002"), (1, "000001")]:
-        payload = {
-            "version": 1,
-            "images": 1,
-            "frames": [{"frame_id": frame_id, "image": f"/{frame_id}.jpg"}],
-            "worker": {"index": worker_index, "count": 2},
-            "sam3_runtime": {"precision": {"effective": "fp16"}},
-        }
-        path = tmp_path / f"sam3_single_image_folder_manifest.worker_{worker_index:03d}.json"
-        path.write_text(json.dumps(payload), encoding="utf-8")
-
-    final_path = script.merge_worker_manifests(tmp_path, num_workers=2)
-    combined = json.loads(final_path.read_text(encoding="utf-8"))
-
-    assert combined["images"] == 2
-    assert [item["frame_id"] for item in combined["frames"]] == ["000001", "000002"]
-    assert combined["num_workers"] == 2
-    assert "worker" not in combined
 
 
 def load_script():

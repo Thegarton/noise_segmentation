@@ -23,18 +23,19 @@ def test_collect_images_non_recursive_sorted(tmp_path: Path):
     assert [path.name for path in images] == ["a.jpg", "b.png"]
 
 
-def test_shard_image_paths_distributes_sorted_input_without_overlap():
+def test_classes_from_semantic_mask_does_not_require_json_logs(tmp_path: Path):
     script = load_script()
-    paths = [Path(f"{index:06d}.jpg") for index in range(10)]
+    semantic = np.asarray([[0, 2, 2], [5, 5, 5]], dtype=np.uint16)
+    path = tmp_path / "semantic_mask.npy"
+    np.save(path, semantic)
 
-    shards = [
-        script.shard_image_paths(paths, worker_index=index, num_workers=4)
-        for index in range(4)
-    ]
+    classes = script.classes_from_semantic_mask(
+        path,
+        label_to_id={"CAR": 2, "PEDESTRIAN": 5, "traffic_sign": 10},
+        min_mask_size=2,
+    )
 
-    assert shards[0] == [paths[0], paths[4], paths[8]]
-    assert shards[1] == [paths[1], paths[5], paths[9]]
-    assert sorted(path for shard in shards for path in shard) == paths
+    assert classes == {"CAR", "PEDESTRIAN"}
 
 
 def test_extract_arrays_accepts_sam3_31_output_keys():

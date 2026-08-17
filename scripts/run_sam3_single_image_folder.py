@@ -1463,19 +1463,18 @@ def make_class_list(class_pixel_counts):
     return list(class_pixel_counts.keys())
 
 
-def shard_image_paths(
-    image_paths: list[Path],
+def classes_from_semantic_mask(
+    path: Path,
     *,
-    worker_index: int,
-    num_workers: int,
-) -> list[Path]:
-    if num_workers <= 0:
-        raise ValueError(f"num_workers must be positive, got {num_workers}")
-    if worker_index < 0 or worker_index >= num_workers:
-        raise ValueError(
-            f"worker_index must be in [0, {num_workers}), got {worker_index}"
-        )
-    return image_paths[worker_index::num_workers]
+    label_to_id: Mapping[str, int],
+    min_mask_size: int,
+) -> set[str]:
+    semantic_mask = np.load(path)
+    classes: set[str] = set()
+    for label, class_id in label_to_id.items():
+        if int(np.count_nonzero(semantic_mask == int(class_id))) >= min_mask_size:
+            classes.add(label)
+    return classes
 
 
 def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
@@ -1488,9 +1487,8 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
                              vehicle_orientation_nms_iou = 0.80, vehicle_prompt_label = "vehicle",
                              sam3_only = False, prompt_log = False,
                              inference_precision = "auto", cache_visual_features = False,
-                             worker_index = 0, num_workers = 1,
                              frame_image_pairs = None
-                             ) -> None:
+                             ) -> set[str]:
 
 
     validate_probability(vehicle_orientation_min_confidence, name="vehicle_orientation_min_confidence")
@@ -1525,15 +1523,8 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         if max_images <= 0:
             raise ValueError(f"--max-images must be positive, got {max_images}")
         image_records = image_records[: max_images]
-    image_records = shard_image_paths(
-        image_records,
-        worker_index=int(worker_index),
-        num_workers=int(num_workers),
-    )
     if not image_records:
-        raise ValueError(
-            f"Worker {worker_index}/{num_workers} received no images from {image_dir}"
-        )
+        raise ValueError(f"No images selected from {image_dir}")
 
     prompts_by_label = load_prompt_config(prompt_config)
     class_to_id = load_semantic_classes(classes_yaml)
@@ -1641,6 +1632,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
     )
 
     results = []
+    detected_classes: set[str] = set()
     for index, (explicit_frame_id, image_path) in enumerate(image_records, start=1):
         frame_out = (
             out_dir / explicit_frame_id
@@ -1662,6 +1654,13 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             metadata_path = frame_out / "metadata.json"
             if projection_info and metadata_path.is_file():
                 update_metadata(metadata_path, projection_info)
+            detected_classes.update(
+                classes_from_semantic_mask(
+                    frame_out / "semantic_mask.npy",
+                    label_to_id=label_to_id,
+                    min_mask_size=min_mask_size,
+                )
+            )
             results.append(
                 {
                     "image": str(image_path),
@@ -1673,9 +1672,8 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             )
             continue
 
-        worker_prefix = f"[worker {worker_index + 1}/{num_workers}] " if num_workers > 1 else ""
         print(
-            f"{worker_prefix}[{index:04d}/{len(image_records):04d}] {image_path}",
+            f"[{index:04d}/{len(image_records):04d}] {image_path}",
             file=sys.stderr,
             flush=True,
         )
@@ -1701,6 +1699,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             vehicle_orientation_nms_iou=vehicle_orientation_nms_iou,
         )
         processing_time_seconds = time.perf_counter() - frame_started_at
+        detected_classes.update(result.class_pixel_counts)
         metadata = {
             "version": 1,
             "frame_id": frame_out.name,
@@ -1726,11 +1725,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             "mask_nms_iou": float(vehicle_orientation_nms_iou),
             "processing_time_seconds": round(processing_time_seconds, 6),
             "sam3_runtime": sam3_runtime_summary(predictor),
-            "worker": {
-                "index": int(worker_index),
-                "count": int(num_workers),
-                "physical_gpu_id": os.environ.get("SAM3_PHYSICAL_GPU_ID"),
-            },
+            "physical_gpu_id": os.environ.get("SAM3_PHYSICAL_GPU_ID"),
             "vehicle_orientation": {
                 "enabled": vehicle_orientation_classifier is not None,
                  "mode": vehicle_orientation_mode,
@@ -1792,11 +1787,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         "labels": label_to_id,
         "frames": results,
         "sam3_runtime": sam3_runtime_summary(predictor),
-        "worker": {
-            "index": int(worker_index),
-            "count": int(num_workers),
-            "physical_gpu_id": os.environ.get("SAM3_PHYSICAL_GPU_ID"),
-        },
+        "physical_gpu_id": os.environ.get("SAM3_PHYSICAL_GPU_ID"),
         "vehicle_orientation": {
             "enabled": vehicle_orientation_classifier is not None,
             "mode": vehicle_orientation_mode,
@@ -1815,11 +1806,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             },
         },
     }
-    manifest_name = (
-        "sam3_single_image_folder_manifest.json"
-        if num_workers == 1
-        else f"sam3_single_image_folder_manifest.worker_{worker_index:03d}.json"
-    )
-    manifest_path = out_dir / manifest_name
+    manifest_path = out_dir / "sam3_single_image_folder_manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"images": len(image_records), "manifest": str(manifest_path)}, indent=2))
+    return detected_classes
