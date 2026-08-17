@@ -20,6 +20,24 @@ def test_configure_gpu_selects_one_physical_device(monkeypatch) -> None:
     assert os.environ["SAM3_PHYSICAL_GPU_ID"] == "3"
 
 
+def test_load_csv_class_tags_reads_mapping(tmp_path: Path) -> None:
+    script = load_script()
+    config = tmp_path / "tags.yaml"
+    config.write_text(
+        "class_tags:\n"
+        '  traffic_cone: "锥桶(traffic_cone)"\n'
+        '  ground_markings: "地面标识(ground_markings)"\n',
+        encoding="utf-8",
+    )
+
+    tags = script.load_csv_class_tags(config)
+
+    assert tags == {
+        "traffic_cone": "锥桶(traffic_cone)",
+        "ground_markings": "地面标识(ground_markings)",
+    }
+
+
 def test_load_matched_frames_resolves_zero_based_time_map_index(tmp_path: Path) -> None:
     script = load_script()
     image_dir = tmp_path / "images"
@@ -118,11 +136,11 @@ def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -
 
     with summary_path.open(encoding="utf-8", newline="") as stream:
         row = next(csv.DictReader(stream))
-    assert json.loads(row["classes"]) == [
-        "epoxy_floor",
-        "front_of_vehicle",
-        "ground_markings",
-    ]
+    assert row["tags"] == (
+        "环氧地坪(epoxy_floor); "
+        "front_of_vehicle; "
+        "地面标识(ground_markings)"
+    )
     assert row["data_name"] == "data_name"
     assert row["start_frame"] == "000080"
     assert row["end_frame"] == "000081"
@@ -167,7 +185,7 @@ def test_write_run_summary_csv_filters_by_count_and_consecutive_frames(tmp_path:
     with summary_path.open(encoding="utf-8", newline="") as stream:
         row = next(csv.DictReader(stream))
 
-    assert json.loads(row["classes"]) == ["consecutive"]
+    assert row["tags"] == "consecutive"
     assert json.loads(row["class_frame_counts"]) == {
         "consecutive": 3,
         "scattered": 3,

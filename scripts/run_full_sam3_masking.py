@@ -18,6 +18,59 @@ from run_sam3_single_image_folder import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+DEFAULT_CSV_TAGS_CONFIG = REPO_ROOT / "configs" / "sam3_csv_class_tags_zh_en.yaml"
+
+
+def load_csv_class_tags(path: str | Path) -> dict[str, str]:
+    config_path = Path(path).expanduser().resolve()
+    if not config_path.is_file():
+        raise FileNotFoundError(f"CSV class-tags config does not exist: {config_path}")
+
+    tags: dict[str, str] = {}
+    in_class_tags = False
+    for line_number, raw_line in enumerate(
+        config_path.read_text(encoding="utf-8-sig").splitlines(),
+        start=1,
+    ):
+        line_without_comment = raw_line.split("#", 1)[0].rstrip()
+        if not line_without_comment.strip():
+            continue
+        indent = len(line_without_comment) - len(line_without_comment.lstrip(" "))
+        line = line_without_comment.strip()
+
+        if indent == 0:
+            in_class_tags = line == "class_tags:"
+            continue
+        if not in_class_tags:
+            continue
+        if indent != 2 or ":" not in line:
+            raise ValueError(
+                f"Expected '  english_label: bilingual tag' in "
+                f"{config_path}:{line_number}, got {raw_line!r}"
+            )
+
+        label, tag = (value.strip() for value in line.split(":", 1))
+        if len(tag) >= 2 and tag[0] in {"'", '"'} and tag[-1] == tag[0]:
+            tag = tag[1:-1]
+        if not label or not tag:
+            raise ValueError(
+                f"Empty class label or CSV tag in {config_path}:{line_number}"
+            )
+        if label in tags:
+            raise ValueError(
+                f"Duplicate class label {label!r} in {config_path}:{line_number}"
+            )
+        tags[label] = tag
+
+    if not tags:
+        raise ValueError(f"No entries found under class_tags in {config_path}")
+    return tags
+
+
+def format_csv_tags(classes: list[str], *, class_tags: dict[str, str]) -> str:
+    return "; ".join(class_tags.get(label, label) for label in classes)
+
+
 @dataclass(frozen=True)
 class MatchedFrame:
     frame_id: str
@@ -47,6 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-name",
         default=None,
         help="Dataset name written to sam3_run_summary.csv. Default: data_name.",
+    )
+    parser.add_argument(
+        "--csv-tags-yaml",
+        default=str(DEFAULT_CSV_TAGS_CONFIG),
+        help="YAML mapping English class labels to tags written to sam3_run_summary.csv.",
     )
     parser.add_argument(
         "--img-time-map",
@@ -389,6 +447,9 @@ def write_run_summary_csv(
     data_name = str(args.data_name).strip() if args.data_name is not None else ""
     if not data_name:
         data_name = "data_name"
+    class_tags = load_csv_class_tags(
+        getattr(args, "csv_tags_yaml", DEFAULT_CSV_TAGS_CONFIG)
+    )
 
     summary_path = out_dir / "sam3_run_summary.csv"
     temporary_path = summary_path.with_suffix(summary_path.suffix + ".tmp")
@@ -396,7 +457,7 @@ def write_run_summary_csv(
         writer = csv.DictWriter(
             stream,
             fieldnames=[
-                "classes",
+                "tags",
                 "data_name",
                 "start_frame",
                 "end_frame",
@@ -412,7 +473,7 @@ def write_run_summary_csv(
         writer.writeheader()
         writer.writerow(
             {
-                "classes": json.dumps(filtered_classes, ensure_ascii=False),
+                "tags": format_csv_tags(filtered_classes, class_tags=class_tags),
                 "data_name": data_name,
                 "start_frame": frame_ids[0],
                 "end_frame": frame_ids[-1],
