@@ -37,20 +37,23 @@ PYTHONPATH=src python scripts/rectify_fisheye_opencv.py \
 
 Use `--auto-circle` instead of explicit center/radius only when the lens circle has a clean black border. `perspective` is the normal choice for SAM3 and other image models. `cylindrical` retains a wider horizontal view with less edge stretching, but its geometry is less similar to a conventional pinhole camera. Increasing `--output-size` improves sampling and downstream working resolution, but cannot restore detail absent from the source image.
 
-2. Run SAM3 as a camera teacher. For image folders, use the single-image runner:
+2. Run SAM3 as a camera teacher. The full wrapper prepares optional camera images,
+selects matched frames, runs the folder predictor, and collects review previews:
 
 ```bash
 PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
-  python scripts/run_sam3_single_image_folder.py \
-  --image-dir /path/to/img2 \
-  --projection-dir /path/to/projection_images \
+  python scripts/run_full_sam3_masking.py \
+  --skip-preprocessing \
+  --image-dir /path/to/prepared_images \
   --out-dir ./output/sam3_single_image_folder \
   --prompt-config configs/sam3_text_prompts_pointwise_v1.yaml \
   --classes-yaml configs/classes_pointwise_v1.yaml \
   --sam3-root /home/a60116606/git_repo/sam3 \
   --sam3-model-path /home/a60116606/git_repo/sam3/sam3.1 \
   --min-score 0.63 \
-  --label-min-scores configs/sam3_label_min_scores.yaml \
+  --label-min-score configs/sam3_label_min_scores.yaml \
+  --gpu-id 0 \
+  --cache-visual-features \
   --overwrite
 ```
 
@@ -65,25 +68,26 @@ traffic_sign: 0.45
 
 Label names must exactly match the top-level keys in the active prompt config. Per-label thresholds and the effective fallback-expanded table are saved in every frame's `metadata.json` and in the run manifest. Use `--overwrite` or a new output directory when changing thresholds, otherwise existing predictions are kept.
 
-For independent image inference on four Tesla T4 cards, run the full wrapper with one process per GPU:
+For independent image inference on four Tesla T4 cards, start four wrapper
+processes with separate input/output ranges and `--gpu-id 0`, `1`, `2`, or `3`.
+The wrapper itself intentionally owns only one GPU and does not spawn workers.
 
 ```bash
-PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
-  python scripts/run_full_sam3_masking.py \
-  --skip-conversion \
-  --image-dir /path/to/prepared_images \
-  --out-dir ./output/sam3_single_image_folder \
+python scripts/run_full_sam3_masking.py \
+  --skip-preprocessing \
+  --image-dir /path/to/prepared_images_part_0 \
+  --out-dir ./output/sam3_part_0 \
   --prompt-config configs/sam3_text_prompts_pointwise_v1.yaml \
   --classes-yaml configs/classes_pointwise_v1.yaml \
-  --sam3-root /home/a60116606/git_repo/sam3 \
-  --sam3-model-path /home/a60116606/git_repo/sam3/sam3.1 \
-  --gpu-ids 0,1,2,3 \
+  --gpu-id 0 \
   --inference-precision auto \
-  --cache-visual-features \
-  --overwrite
+  --cache-visual-features
 ```
 
-Preprocessing runs once in the parent process; sorted images are split between workers without overlap. On T4, `auto` selects FP16 because T4 has no native BF16 execution. Do not enable `--use-fa3` on T4. Each worker writes its own manifest, and the parent merges them into `sam3_single_image_folder_manifest.json` after all workers finish. `--cache-visual-features` reuses the image backbone output between text prompts while still running text-conditioned detection and mask prediction for every prompt.
+On T4, `auto` selects FP16 because T4 has no native BF16 execution. Do not
+enable `--use-fa3` on T4. `--cache-visual-features` reuses the image backbone
+output between text prompts while still running text-conditioned detection and
+mask prediction for every prompt.
 
 ### Vehicle front/rear classifier
 

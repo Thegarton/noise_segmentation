@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
 import inspect
 import json
 import os
@@ -85,12 +84,7 @@ class ImageResult:
     instances: list[Sam3Instance]
     class_pixel_counts: dict[str, int]
     overlay_instances: tuple[Sam3Instance, ...] = ()
-    projection_path: str | None = None
-    projection_copy_path: str | None = None
     orientation_predictions: tuple[dict[str, Any], ...] = ()
-    mask_projection_path: str | None = None
-    projection_frame_id: str | None = None 
-    projection_error: str | None = None
 
 def process_image(
     *,
@@ -102,10 +96,7 @@ def process_image(
     min_score: float,
     label_min_scores: dict[str, float],
     prompt_log: bool,
-    projection_dir: Path | None,
     min_mask_size: int,
-    require_projection: bool,
-    projection_frame_id: str | None = None,
     vehicle_orientation_classifier: Any | None = None,
     vehicle_prompt_label: str = "vehicle",
     vehicle_class_mapping: dict[str, tuple[str, int]] | None = None,
@@ -196,7 +187,7 @@ def process_image(
         confidence=confidence,
         min_mask_size=min_mask_size,
     )
-    projection_info = save_image_outputs(
+    save_image_outputs(
         image=image,
         image_path=image_path,
         output_dir=output_dir,
@@ -204,8 +195,6 @@ def process_image(
         overlay_instances=list(overlay_instances),
         semantic_mask=semantic_mask,
         confidence=confidence,
-        projection_dir=projection_dir,
-        require_projection=require_projection,
     )
     return ImageResult(
         image_path=image_path,
@@ -219,11 +208,6 @@ def process_image(
             for item in instances
             if item.orientation_label is not None
         ),
-        projection_path=projection_info.get("projection_path"),
-        projection_copy_path=projection_info.get("projection_copy"),
-        mask_projection_path=projection_info.get("mask_projection"),
-        projection_error=projection_info.get("projection_error"),
-        projection_frame_id=projection_frame_id,
     )
 
 
@@ -510,9 +494,6 @@ def reject_instance_by_geometry(
     if item.label == "pillar_corner_guard":
         return y_bottom < min_y_bottom or aspect_ratio > min_aspect_ratio
 
-    if item.label == "height_restriction_barrel":
-        return y_bottom > min_y_bottom 
-
     return y_bottom < min_y_bottom or aspect_ratio < min_aspect_ratio
 
 
@@ -745,13 +726,6 @@ def instance_orientation_metadata(item: Sam3Instance) -> dict[str, Any]:
         "sam3_score": float(item.score),
     }
 
-
-
-def projection_lookup_path(image_path: Path, *, frame_id: str | None) -> Path:
-    if frame_id is None: 
-        return image_path
-    return image_path.with_name(f"{frame_id}{image_path.suffix}")
-
 def save_image_outputs(
     *,
     image: Any,
@@ -761,10 +735,7 @@ def save_image_outputs(
     overlay_instances: list[Sam3Instance] | None = None,
     semantic_mask: np.ndarray,
     confidence: np.ndarray,
-    projection_dir: Path | None = None,
-    require_projection: bool = False,
-    projection_frame_id: str | None = None,
-) -> dict[str, str | None]:
+) -> None:
     from PIL import Image  # noqa: WPS433
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -785,15 +756,6 @@ def save_image_outputs(
     Image.fromarray(semantic_color).save(output_dir / "semantic_color.png")
     Image.fromarray(make_preview(image_np, semantic_color, overlay)).save(output_dir / "preview.jpg", quality=95)
 
-    projection_info = save_mask_projection_preview(
-        image_path=projection_lookup_path(image_path, frame_id=projection_frame_id),
-        output_dir=output_dir,
-        projection_dir=projection_dir,
-        image_np=image_np,
-        semantic_color=semantic_color,
-        overlay=overlay,
-        require_projection=require_projection,
-    )
     image.save(output_dir / "image.jpg", quality=95)
 
     instances_json = [
@@ -810,7 +772,6 @@ def save_image_outputs(
     ]
     (output_dir / "instances.json").write_text(json.dumps(instances_json, ensure_ascii=False, indent=2), encoding="utf-8")
     (output_dir / "source_image.txt").write_text(str(image_path), encoding="utf-8")
-    return projection_info
 
 
 def instance_to_log_json(item: Sam3Instance) -> dict[str, Any]:
@@ -857,135 +818,6 @@ def build_classes_log(
         "instances": visible_instances,
         "processing_time_seconds": round(processing_time_seconds, 6),
     }
-
-
-def maybe_save_existing_mask_projection(
-    *,
-    image_path: Path,
-    frame_out: Path,
-    projection_dir: Path | None,
-    require_projection: bool,
-) -> dict[str, str | None] | None:
-    if projection_dir is None:
-        return None
-    mask_projection_path = frame_out / "mask_projection.jpg"
-    if mask_projection_path.is_file():
-        return None
-    semantic_path = frame_out / "semantic_mask.npy"
-    local_image_path = frame_out / "image.jpg"
-    if not semantic_path.is_file() or not local_image_path.is_file():
-        return None
-
-    from PIL import Image  # noqa: WPS433
-
-    semantic_mask = np.load(semantic_path)
-    image_np = np.asarray(Image.open(local_image_path).convert("RGB"), dtype=np.uint8)
-    semantic_color = make_semantic_color(semantic_mask)
-    overlay = make_overlay(image_np, semantic_mask)
-    return save_mask_projection_preview(
-        image_path=image_path,
-        output_dir=frame_out,
-        projection_dir=projection_dir,
-        image_np=image_np,
-        semantic_color=semantic_color,
-        overlay=overlay,
-        require_projection=require_projection,
-    )
-
-
-def save_mask_projection_preview(
-    *,
-    image_path: Path,
-    output_dir: Path,
-    projection_dir: Path | None,
-    image_np: np.ndarray,
-    semantic_color: np.ndarray,
-    overlay: np.ndarray,
-    require_projection: bool,
-) -> dict[str, str | None]:
-    if projection_dir is None:
-        return {"projection_path": None, "mask_projection": None, "projection_error": None}
-
-    projection_path = find_projection_for_image(projection_dir, image_path)
-    if projection_path is None:
-        message = f"Projection image for {image_path.stem!r} was not found in {projection_dir}"
-        if require_projection:
-            raise FileNotFoundError(message)
-        print(f"[run_sam3_single_image_folder] WARNING: {message}", file=sys.stderr, flush=True)
-        return {"projection_path": None, "mask_projection": None, "projection_error": message}
-
-    from PIL import Image  # noqa: WPS433
-
-    projection = Image.open(projection_path).convert("RGB")
-    target_size = (image_np.shape[1], image_np.shape[0])
-    if projection.size != target_size:
-        projection = projection.resize(target_size)
-
-
-    #CHANGES FRO TEST, REPLACE PROJECTION ON TRIPTYCH BY IMAGE
-    preview = make_labeled_triptych(
-        [
-            ("semantic class id", semantic_color),
-            ("overlay", overlay),
-            ("projection", np.asarray(projection, dtype=np.uint8)),
-        ]
-    )
-    output_path = output_dir / "mask_projection.jpg"
-    projection_output_path = output_dir / "projection.jpg"
-    Image.fromarray(preview).save(output_path, quality=95)
-    # projection.save(projection_output_path, quality=95)
-    return {
-        "projection_path": str(projection_path),
-        "projection_copy": str(projection_output_path),
-        "mask_projection": str(output_path),
-        "projection_error": None,
-    }
-
-
-def find_projection_for_image(projection_dir: Path, image_path: Path) -> Path | None:
-    stem = image_path.stem
-    candidates = []
-    preferred = projection_dir / f"{stem}{image_path.suffix.lower()}"
-    if preferred.is_file():
-        return preferred
-    for suffix in sorted(IMAGE_SUFFIXES):
-        candidate = projection_dir / f"{stem}{suffix}"
-        if candidate.is_file():
-            candidates.append(candidate)
-    if candidates:
-        return sorted(candidates)[0]
-    recursive_candidates = sorted(path for path in projection_dir.rglob(f"{stem}.*") if path.suffix.lower() in IMAGE_SUFFIXES)
-    return recursive_candidates[0] if recursive_candidates else None
-
-
-def make_labeled_triptych(panels: list[tuple[str, np.ndarray]]) -> np.ndarray:
-    from PIL import Image, ImageDraw  # noqa: WPS433
-
-    label_height = 32
-    separator_width = 8
-    pil_panels = []
-    for title, panel in panels:
-        image = Image.fromarray(np.asarray(panel, dtype=np.uint8)).convert("RGB")
-        canvas = Image.new("RGB", (image.width, image.height + label_height), (255, 255, 255))
-        canvas.paste(image, (0, label_height))
-        draw = ImageDraw.Draw(canvas)
-        draw.text((8, 8), title, fill=(0, 0, 0))
-        pil_panels.append(canvas)
-
-    height = max(panel.height for panel in pil_panels)
-    width = sum(panel.width for panel in pil_panels) + separator_width * (len(pil_panels) - 1)
-    combined = Image.new("RGB", (width, height), (255, 255, 255))
-    x = 0
-    for panel in pil_panels:
-        combined.paste(panel, (x, 0))
-        x += panel.width + separator_width
-    return np.asarray(combined, dtype=np.uint8)
-
-
-def update_metadata(metadata_path: Path, values: dict[str, str | None]) -> None:
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata.update(values)
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def save_instances_npz(path: Path, instances: list[Sam3Instance], *, shape: tuple[int, int]) -> None:
@@ -1226,10 +1058,10 @@ def to_numpy(value: Any) -> np.ndarray | None:
     return np.asarray(value)
 
 
-def collect_images(image_dir: Path) -> list[Path]:
+def collect_images(image_dir: Path, *, recursive: bool = False) -> list[Path]:
     if not image_dir.is_dir():
         raise FileNotFoundError(f"Image directory does not exist: {image_dir}")
-    iterator =  image_dir.iterdir()
+    iterator = image_dir.rglob("*") if recursive else image_dir.iterdir()
     return sorted(path for path in iterator if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
 
 
@@ -1243,7 +1075,6 @@ def output_dir_for_image(out_dir: Path, image_dir: Path, image_path: Path, *, re
 def outputs_exist(
     frame_out: Path,
     *,
-    projection_enabled: bool = False,
     classes_log_enabled: bool = False,
 ) -> bool:
     required = [
@@ -1253,8 +1084,6 @@ def outputs_exist(
         frame_out / "overlay.jpg",
         frame_out / "metadata.json",
     ]
-    if projection_enabled:
-        required.extend([frame_out / "projection.jpg", frame_out / "mask_projection.jpg"])
     if classes_log_enabled:
         required.append(frame_out / "classes_log.json")
     return all(path.is_file() for path in required)
@@ -1436,39 +1265,6 @@ def patch_hf_checkpoint_download(model_builder_module: Any, *, checkpoint_path: 
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     os.environ.setdefault("HF_HOME", str(model_dir))
 
-# may be deleted, but it contain description and help for some fields
-# it could be helpful
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the SAM3.1 single-image prompt notebook flow over an image folder.")
-    parser.add_argument("--image-dir", required=True, help="Directory with camera images.")
-    parser.add_argument("--out-dir", required=True, help="Output directory. Each image gets its own subdirectory.")
-    parser.add_argument("--prompt-config", default=str(REPO_ROOT / "configs" / "sam3_text_prompts_pointwise_v1.yaml"))
-    parser.add_argument("--classes-yaml", default=str(REPO_ROOT / "configs" / "classes_pointwise_v1.yaml"))
-    parser.add_argument("--sam3-root", default=None, help="Path to cloned SAM3 repo, e.g. /home/.../git_repo/sam3.")
-    parser.add_argument("--sam3-model-path", default=None, help="Path to local facebook/sam3.1 model directory.")
-    parser.add_argument("--min-score", type=float, default=0.70)
-    parser.add_argument("--max-images", type=int, default=None, help="Optional smoke-test limit.")
-    parser.add_argument("--max-prompts", type=int, default=None, help="Optional smoke-test prompt limit per image.")
-    parser.add_argument("--recursive", action="store_true", help="Read images recursively and mirror the relative output tree.")
-    parser.add_argument(
-        "--projection-dir",
-        default=None,
-        help="Optional directory with LiDAR point projection images matched to camera images by file stem.",
-    )
-    parser.add_argument(
-        "--require-projection",
-        action="store_true",
-        help="Fail if --projection-dir is set and a matching projection image is missing.",
-    )
-    parser.add_argument("--use-fa3", action="store_true", help="Enable FlashAttention 3. Disabled by default.")
-    parser.add_argument("--prompt-log", action="store_true", help="Print every prompt for every image.")
-    parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--validate", action="store_true")
-    parser.add_argument("--min-mask-size", type=int, default=30)
-    return parser.parse_args()
-
-from collections import Counter
-
 def make_class_list(class_pixel_counts): 
     return list(class_pixel_counts.keys())
 
@@ -1489,18 +1285,35 @@ def classes_from_semantic_mask(
 
 
 
-def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
-                             sam3_root, sam3_model_path, min_score, projection_dir, label_min_scores = None,
-                             recursive = None , max_images = None, max_prompts = None,
-                             use_fa3 = False, overwrite = False, require_projection = False,
-                             validate = False, log_json = False, min_mask_size = 30,
-                             vehicle_orientation_checkpoint = None, vehicle_orientation_device = "auto",
-                             vehicle_orientation_min_confidence = 0.75, vehicle_orientation_min_margin = 0.10,
-                             vehicle_orientation_nms_iou = 0.80, vehicle_prompt_label = "vehicle", 
-                             sam3_only = False, prompt_log = False,
-                             inference_precision = "auto", cache_visual_features = False,
-                             worker_index = 0, num_workers = 1, frame_image_pairs = None,
-                             ) -> set[str]:
+def sam3_single_image_folder(
+    image_dir,
+    out_dir,
+    prompt_config,
+    classes_yaml,
+    sam3_root,
+    sam3_model_path,
+    min_score,
+    label_min_scores=None,
+    recursive=False,
+    max_images=None,
+    max_prompts=None,
+    use_fa3=False,
+    overwrite=False,
+    validate=False,
+    log_json=False,
+    min_mask_size=30,
+    vehicle_orientation_checkpoint=None,
+    vehicle_orientation_device="auto",
+    vehicle_orientation_min_confidence=0.75,
+    vehicle_orientation_min_margin=0.10,
+    vehicle_orientation_nms_iou=0.80,
+    vehicle_prompt_label="vehicle",
+    sam3_only=False,
+    prompt_log=False,
+    inference_precision="auto",
+    cache_visual_features=False,
+    frame_image_pairs=None,
+) -> set[str]:
 
 
     validate_probability(vehicle_orientation_min_confidence, name="vehicle_orientation_min_confidence")
@@ -1509,9 +1322,6 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
     image_dir = Path(image_dir).expanduser().resolve()
 
     out_dir = Path(out_dir).expanduser().resolve()
-    projection_dir = Path(projection_dir).expanduser().resolve() if projection_dir else None
-    if projection_dir is not None and not projection_dir.is_dir():
-        raise FileNotFoundError(f"Projection directory does not exist: {projection_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if frame_image_pairs is None:
@@ -1647,19 +1457,9 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         )
         if outputs_exist(
             frame_out,
-            projection_enabled=projection_dir is not None,
             classes_log_enabled=log_json,
         ) and not overwrite:
-            projection_info = maybe_save_existing_mask_projection(
-                image_path=image_path,
-                frame_out=frame_out,
-                projection_dir=projection_dir,
-                require_projection=require_projection,
-            )
             metadata_path = frame_out / "metadata.json"
-            if projection_info and metadata_path.is_file():
-                update_metadata(metadata_path, projection_info)
-
             detected_classes.update(
                 classes_from_semantic_mask(
                     frame_out / "semantic_mask.npy",
@@ -1692,11 +1492,8 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             label_to_id=label_to_id,
             label_min_scores=effective_label_min_scores,
             min_score=min_score,
-            prompt_log=False,
-            projection_dir=projection_dir,
+            prompt_log=prompt_log,
             min_mask_size=min_mask_size,
-            require_projection=require_projection,
-            projection_frame_id=explicit_frame_id,
             vehicle_orientation_classifier=vehicle_orientation_classifier,
             vehicle_prompt_label=vehicle_prompt_label,
             vehicle_class_mapping=vehicle_class_mapping,
@@ -1723,11 +1520,6 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             "instances": len(result.instances),
             "overlay_instances": len(result.overlay_instances),
             "class_pixel_counts": result.class_pixel_counts,
-            "projection_dir": str(projection_dir) if projection_dir is not None else None,
-            "projection_path": result.projection_path,
-            "projection_copy": result.projection_copy_path,
-            "mask_projection": result.mask_projection_path,
-            "projection_error": result.projection_error,
             "mask_nms_iou": float(vehicle_orientation_nms_iou),
             "processing_time_seconds": round(processing_time_seconds, 6),
             "sam3_runtime": sam3_runtime_summary(predictor),
@@ -1781,8 +1573,6 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         "classes_yaml": str(Path(classes_yaml)),
         "sam3_root": str(sam3_root) if sam3_root is not None else None,
         "sam3_model_path": str(model_dir) if model_dir is not None else None,
-        "projection_dir": str(projection_dir) if projection_dir is not None else None,
-        "require_projection": bool(require_projection),
         "min_score": float(min_score),
         "label_min_scores_file": str(Path(label_min_scores).expanduser().resolve()) if label_min_scores else None,
         "label_min_score_overrides": label_min_score_overrides,
@@ -1793,11 +1583,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         "labels": label_to_id,
         "frames": results,
         "sam3_runtime": sam3_runtime_summary(predictor),
-        "worker": {
-            "index": int(worker_index),
-            "count": int(num_workers),
-            "physical_gpu_id": os.environ.get("SAM3_PHYSICAL_GPU_ID"),
-        },
+        "physical_gpu_id": os.environ.get("SAM3_PHYSICAL_GPU_ID"),
         "vehicle_orientation": {
             "enabled": vehicle_orientation_classifier is not None,
             "mode": vehicle_orientation_mode,

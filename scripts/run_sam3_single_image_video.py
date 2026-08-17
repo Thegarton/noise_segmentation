@@ -292,17 +292,12 @@ def build_single_image_command(
     optional_path_args = [
         ("--sam3-root", args.sam3_root),
         ("--sam3-model-path", args.sam3_model_path),
-        ("--projection-dir", args.projection_dir),
         ("--label-min-scores", args.label_min_scores),
         ("--vehicle-orientation-checkpoint", getattr(args, "vehicle_orientation_checkpoint", None)),
     ]
     for flag, value in optional_path_args:
         if value:
             command.extend([flag, str(Path(value).expanduser())])
-    for suffix in args.projection_stem_suffix:
-        command.extend(["--projection-stem-suffix", suffix])
-    if args.require_projection:
-        command.append("--require-projection")
     if args.use_fa3:
         command.append("--use-fa3")
     if args.prompt_log:
@@ -432,14 +427,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vehicle-orientation-nms-iou", type=float, default=0.80)
     parser.add_argument("--sam3-conda-env", default=None, help="Run SAM3 script through `conda run -n ENV python ...`.")
     parser.add_argument("--sam3-conda-prefix", default=None, help="Run SAM3 script through `conda run -p PREFIX python ...`.")
-    parser.add_argument("--projection-dir", default=None, help="Optional projection image directory passed through.")
-    parser.add_argument(
-        "--projection-stem-suffix",
-        action="append",
-        default=[],
-        help="Optional suffix stripped by the single-image script when matching projection images.",
-    )
-    parser.add_argument("--require-projection", action="store_true")
     parser.add_argument("--min-score", type=float, default=0.70)
     parser.add_argument("--min-mask-size", type=int, default=30)
     parser.add_argument(

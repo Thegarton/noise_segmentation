@@ -13,8 +13,6 @@ def test_build_single_image_command_uses_conda_prefix(tmp_path: Path):
         sam3_conda_prefix="/envs/sam3",
         sam3_root="/repo/sam3",
         sam3_model_path="/repo/sam3/sam3.1",
-        projection_dir="/data/projection",
-        projection_stem_suffix=["_original"],
         overwrite=True,
         validate=True,
     )
@@ -34,10 +32,6 @@ def test_build_single_image_command_uses_conda_prefix(tmp_path: Path):
     assert "/repo/sam3" in command
     assert "--sam3-model-path" in command
     assert "/repo/sam3/sam3.1" in command
-    assert "--projection-dir" in command
-    assert "/data/projection" in command
-    assert "--projection-stem-suffix" in command
-    assert "_original" in command
     assert "--overwrite" in command
     assert "--validate" in command
 
@@ -166,9 +160,6 @@ def make_args(**overrides):
         "vehicle_orientation_min_confidence": 0.70,
         "vehicle_orientation_min_margin": 0.10,
         "vehicle_orientation_nms_iou": 0.80,
-        "projection_dir": None,
-        "projection_stem_suffix": [],
-        "require_projection": False,
         "use_fa3": False,
         "prompt_log": False,
         "overwrite": False,

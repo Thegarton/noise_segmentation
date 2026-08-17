@@ -27,11 +27,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Prepare HL320 images and run SAM3.1 on one selected GPU."
     )
-    parser.add_argument("-i", "--folder_path", help="Path to the folder with source .bin files.")
-    parser.add_argument("-I", "--image-folder-path", help="Path used by image-only conversion.")
-    parser.add_argument("-o", "--output_folder_name", help="Output directory for converted data.")
-    parser.add_argument("--skip-conversion", action="store_true")
-    parser.add_argument("--without-bin", action="store_true")
+    parser.add_argument(
+        "--image-folder-path",
+        help="Optional source image directory to preprocess before SAM3 inference.",
+    )
+    parser.add_argument(
+        "--skip-preprocessing",
+        action="store_true",
+        help="Use --image-dir as-is without camera preprocessing.",
+    )
 
     parser.add_argument("--image-dir", required=True, help="Directory with prepared camera images.")
     parser.add_argument("--out-dir", required=True, help="Output directory for per-image SAM3 results.")
@@ -76,15 +80,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sam3-root", default=str(REPO_ROOT / "../sam3"))
     parser.add_argument("--sam3-model-path", default=str(REPO_ROOT / "../sam3/sam3.1"))
     parser.add_argument("--min-score", type=float, default=0.70)
-    parser.add_argument("--projection-dir", default=None)
-    parser.add_argument("--require-projection", action="store_true")
-    parser.add_argument("--label-min-scores", default=None)
+    parser.add_argument(
+        "--label-min-score",
+        "--label-min-scores",
+        dest="label_min_scores",
+        default=None,
+        help="Optional YAML file with per-label SAM3 score thresholds.",
+    )
     parser.add_argument("--use-fa3", action="store_true")
     parser.add_argument("--prompt-log", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--max-images", type=int, default=None)
     parser.add_argument("--max-prompts", type=int, default=None)
+    parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--log-json", action="store_true")
     parser.add_argument("--min-mask-size", type=int, default=30)
     parser.add_argument("--defisheye", action="store_true")
@@ -156,8 +165,8 @@ def parse_delimited_rows(path: str | Path, *, columns: int) -> list[list[str]]:
     return rows
 
 
-def index_images(image_dir: Path) -> dict[str, Path]:
-    image_paths = collect_images(image_dir)
+def index_images(image_dir: Path, *, recursive: bool = False) -> dict[str, Path]:
+    image_paths = collect_images(image_dir, recursive=recursive)
     by_stem: dict[str, Path] = {}
     for image_path in image_paths:
         existing = by_stem.get(image_path.stem)
@@ -176,6 +185,7 @@ def load_matched_frames(
     img_match: str | Path,
     start_frame: int | None,
     end_frame: int | None,
+    recursive: bool = False,
 ) -> list[MatchedFrame]:
     if start_frame is not None and start_frame < 0:
         raise ValueError(f"--start-frame must be non-negative, got {start_frame}")
@@ -202,7 +212,7 @@ def load_matched_frames(
         time_by_name[image_name] = timestamp
 
     source_dir = Path(image_dir).expanduser().resolve()
-    images_by_stem = index_images(source_dir)
+    images_by_stem = index_images(source_dir, recursive=recursive)
     match_rows = parse_delimited_rows(img_match, columns=3)
     matches: list[MatchedFrame] = []
     seen_frames: set[str] = set()
@@ -279,6 +289,7 @@ def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame] | Non
         img_match=args.img_match,
         start_frame=args.start_frame,
         end_frame=args.end_frame,
+        recursive=args.recursive,
     )
 
 
@@ -366,8 +377,14 @@ def write_run_summary_csv(
     return summary_path
 
 
-def run_conversion(args: argparse.Namespace) -> None:
-    if args.skip_conversion:
+def run_preprocessing(args: argparse.Namespace) -> None:
+    if args.skip_preprocessing:
+        return
+    if not args.image_folder_path:
+        if args.defisheye or args.colour_correction:
+            raise ValueError(
+                "--image-folder-path is required when camera preprocessing is enabled"
+            )
         return
     try:
         from autolabeler.data.HL320_cameracalibration import (  # type: ignore
@@ -375,24 +392,14 @@ def run_conversion(args: argparse.Namespace) -> None:
         )
     except ImportError as exc:
         raise ImportError(
-            "HL320 conversion helpers are unavailable. Use --skip-conversion when --image-dir "
-            "already contains prepared images."
+            "Camera preprocessing helpers are unavailable. Use --skip-preprocessing "
+            "when --image-dir already contains prepared images."
         ) from exc
-
-    if not args.image_folder_path:
-        raise ValueError("--image-folder-path is required with --without-bin")
-    save_converted_data(args.image_folder_path, args.defisheye, args.colour_correction)
-    
-
-
-def count_selected_images(args: argparse.Namespace) -> int:
-    matches = selected_frame_matches(args)
-    paths = (
-        [match.image_path for match in matches]
-        if matches is not None
-        else collect_images(Path(args.image_dir).expanduser().resolve())
+    save_converted_data(
+        args.image_folder_path,
+        args.defisheye,
+        args.colour_correction,
     )
-    return len(paths)
 
 
 def run_sam3(args: argparse.Namespace, *, matches: list[MatchedFrame] | None) -> set[str]:
@@ -404,13 +411,12 @@ def run_sam3(args: argparse.Namespace, *, matches: list[MatchedFrame] | None) ->
         sam3_root=args.sam3_root,
         sam3_model_path=args.sam3_model_path,
         min_score=args.min_score,
-        projection_dir=args.projection_dir,
         label_min_scores=args.label_min_scores,
+        recursive=args.recursive,
         max_images=args.max_images,
         max_prompts=args.max_prompts,
         use_fa3=args.use_fa3,
         overwrite=args.overwrite,
-        require_projection=args.require_projection,
         validate=args.validate,
         log_json=args.log_json,
         min_mask_size=args.min_mask_size,
@@ -452,7 +458,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     configure_gpu(args.gpu_id)
-    run_conversion(args)
+    run_preprocessing(args)
     matches = selected_frame_matches(args)
     if matches is not None:
         match_manifest = write_match_manifest(args, matches)
