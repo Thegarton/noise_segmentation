@@ -237,11 +237,21 @@ def find_match(bin_name, img_list, line_data, index,i):
 
 def mask_creator(img_dir_path, match_list, upper_radius: int = 860, lower_radius: int = 760, center = None) -> np.ndarray:
 
+    ALLOWED_EXTENSIONS = ['.jpg', '.png', '.jpeg', '.JPG', '.PNG', '.JPEG']
+    
     if match_list and len(match_list[0]) == 2:
-        _img_path = os.path.join(img_dir_path, match_list[0][1] + ".jpg")
+        base_name = match_list[0][1]
     else:
-        _img_path = os.path.join(img_dir_path, match_list[0] + ".jpg")
+        base_name = match_list[0]
+    _img_path = None
+    for ext in ALLOWED_EXTENSIONS:
+        possible_path = os.path.join(img_dir_path, base_name + ext)
+        if os.path.exists(possible_path):
+            _img_path = possible_path
+            break
+                
     _image = cv2.imread(_img_path)
+    
     h, w = _image.shape[:2]
 
     if center is None:
@@ -275,112 +285,7 @@ def masking_img(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return masked_img
 
 
-def save_converted_data(folder_path, output_folder_name):
-    item_list = os.listdir(folder_path)
-    
-    img_dir_name = None 
-    bin_dir_name = None
-    txt_file_name = None
-    
-
-    for item in item_list:
-        if item[-3:] == "img":
-            img_dir_name = item
-        elif item[-3:] == "bin":
-            bin_dir_name = item
-        elif item[-3:] == "txt":
-            txt_file_name = item
-
-    img_dir_path = os.path.join(folder_path,img_dir_name )
-    bin_dir_path = os.path.join(folder_path, bin_dir_name) 
-    match_txt = os.path.join(folder_path, txt_file_name)
-
-    img_list = create_list(img_dir_path)
-    bin_list = create_list(bin_dir_path)
-
-    with open(match_txt, mode = "r") as f:
-        line_data = [line.rstrip('\n').split(">>")  for line in f]
-
-    index = defaultdict(list)
-    for vec in line_data:
-        index[vec[0]].append(vec)
-
-    match_list = []
-        
-    for i in range(len(bin_list)):
-        match = find_match(bin_list[i], img_list, line_data, index, i)
-        match_list.append(match)
-        
-    print(match_list[:5])
-
-    csv_path = os.path.join(folder_path, "csv_" + output_folder_name)
-    velodyne_path = os.path.join(folder_path, "velodyne_" + output_folder_name)
-    projection_path = os.path.join(folder_path, "projection_" + output_folder_name)
-    masked_image_dir_path = os.path.join(folder_path, "img2_masked")
-    original_image_dir_path = os.path.join(folder_path, "img2")
-
-    os.makedirs(csv_path, exist_ok=True)
-    os.makedirs(velodyne_path, exist_ok=True)
-    os.makedirs(projection_path, exist_ok=True)
-    os.makedirs(masked_image_dir_path, exist_ok=True)
-    os.makedirs(original_image_dir_path, exist_ok=True)
-
-    # creating np.array for mask
-    mask_circle = mask_creator(img_dir_path,match_list=match_list, radius=860)
-
-
-
-    for i in range(len(match_list)):
-        bin_path = os.path.join( bin_dir_path, match_list[i][0]+".bin" )
-        img_path = os.path.join(img_dir_path, match_list[i][1] + ".jpg")
-        # print(bin_path)
-        # print(img_path)
-        if i%25 == 0:
-            print(i)
-        row_list = convert_bin2velodyne(bin_path, csv_path, velodyne_path, i)
-
-        original_image_path = os.path.join(original_image_dir_path, f"{i:06d}.jpg")
-        camera_image = cv2.imread(img_path)
-        original_image = camera_image.copy()
-    
-        colour_corrected_img = simple_colour_correction(original_image)
-
-        masked_image_path = os.path.join(masked_image_dir_path, f"{i:06d}.jpg")
-        masked_image = masking_img(colour_corrected_img, mask=mask_circle)
-
-        # increase brightness of the original image
-        # brightness_increase = 40
-        # brightened_image = cv2.convertScaleAbs(original_image, alpha=1.0, beta=brightness_increase)
-
-
-        bin_name = match_list[i][0]
-        img_name = match_list[i][1]
-        
-        text_bin = f"BIN: {bin_name}"
-        text_img = f"IMG: {img_name}"
-        
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 1         
-        color_text = (255, 255, 255) 
-        thickness = 2             
-        
-        cv2.putText(colour_corrected_img, text_bin, (20, 40), font, font_scale, color_text, thickness, cv2.LINE_AA)
-        cv2.putText(colour_corrected_img, text_img, (20, 75), font, font_scale, color_text, thickness, cv2.LINE_AA)
-
-        cv2.putText(masked_image, text_bin, (20, 40), font, font_scale, color_text, thickness, cv2.LINE_AA)
-        cv2.putText(masked_image, text_img, (20, 75), font, font_scale, color_text, thickness, cv2.LINE_AA)
-
-        cv2.imwrite(original_image_path, colour_corrected_img)
-        cv2.imwrite(masked_image_path, masked_image)
-
-        if projection_path:
-            projection_Lidar2Img(row_list, img_path, projection_path, i, match_list)
-        
-    print("done")
-
-
-
-def save_converted_data_without_bin(image_folder_path, defisheye_flag: bool = False):
+def save_converted_data(image_folder_path, defisheye_flag: bool = False, colour_correction_flag: bool = False):
     img_dir_path = image_folder_path
     
     img_list = create_list(img_dir_path)
@@ -395,8 +300,8 @@ def save_converted_data_without_bin(image_folder_path, defisheye_flag: bool = Fa
 
     if defisheye_flag:
         defisheye_image_dir_path = os.path.join(img_dir_path, f"img2_defisheye_{os.path.basename(img_dir_path)}")
-
-    os.makedirs(masked_image_dir_path, exist_ok=True)
+    if colour_correction_flag:
+        os.makedirs(masked_image_dir_path, exist_ok=True)
     os.makedirs(original_image_dir_path, exist_ok=True)
     # creating np.array for mask
     mask_circle = mask_creator(img_dir_path,match_list=img_list, upper_radius=860, lower_radius=760)
@@ -404,9 +309,6 @@ def save_converted_data_without_bin(image_folder_path, defisheye_flag: bool = Fa
     ALLOWED_EXTENSIONS = ['.jpg', '.png', '.jpeg', '.JPG', '.PNG', '.JPEG']
 
     for i, img_name in enumerate(clean_img_list):
-        # if i % 25 == 0:
-        #     print(i)
-
 
         img_name = img_name.strip()
                 
@@ -432,16 +334,15 @@ def save_converted_data_without_bin(image_folder_path, defisheye_flag: bool = Fa
             continue
 
 
-        original_image = camera_image.copy()
+        image = camera_image.copy()
 
-        
-        colour_corrected_img = simple_colour_correction(original_image)
+        if colour_correction_flag:
+            image = simple_colour_correction(image)
+            masked_image_path = os.path.join(masked_image_dir_path, f"{i+1:06d}.jpg")
+            masked_image = masking_img(image, mask=mask_circle)
 
-        masked_image_path = os.path.join(masked_image_dir_path, f"{i:06d}.jpg")
-        masked_image = masking_img(colour_corrected_img, mask=mask_circle)
 
-
-        original_image_path = os.path.join(original_image_dir_path, f"{i:06d}.jpg")
+        original_image_path = os.path.join(original_image_dir_path, f"{i+1:06d}.jpg")
 
         
         text_img = f"IMG: {img_name}"
@@ -450,12 +351,14 @@ def save_converted_data_without_bin(image_folder_path, defisheye_flag: bool = Fa
         color_text = (255, 255, 255)
         thickness = 2
 
-        cv2.putText(colour_corrected_img, text_img, (20, 75), font, font_scale, color_text, thickness, cv2.LINE_AA)
-        cv2.putText(masked_image, text_img, (20, 75), font, font_scale, color_text, thickness, cv2.LINE_AA)
+        cv2.putText(image, text_img, (20, 75), font, font_scale, color_text, thickness, cv2.LINE_AA)
+        if colour_correction_flag:
+            cv2.putText(masked_image, text_img, (20, 75), font, font_scale, color_text, thickness, cv2.LINE_AA)
 
-        # 5. Сохранение результатов
-        cv2.imwrite(original_image_path, colour_corrected_img)
-        cv2.imwrite(masked_image_path, masked_image)
+        
+        cv2.imwrite(original_image_path, image)
+        if colour_correction_flag:
+            cv2.imwrite(masked_image_path, masked_image)
 
         if defisheye_flag:
             defisheye(

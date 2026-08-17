@@ -19,6 +19,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from autolabeler.data.class_config import load_semantic_classes  # noqa: E402
+
 from autolabeler.teachers.sam3_runtime_adapter import (  # noqa: E402
     clear_visual_feature_cache,
     configure_sam3_runtime,
@@ -88,6 +89,7 @@ class ImageResult:
     projection_copy_path: str | None = None
     orientation_predictions: tuple[dict[str, Any], ...] = ()
     mask_projection_path: str | None = None
+    projection_frame_id: str | None = None 
     projection_error: str | None = None
 
 def process_image(
@@ -123,6 +125,7 @@ def process_image(
             detection_min_score = float(label_min_scores.get(label, min_score))
             if prompt_log:
                 print(f"  [{prompt_idx:03d}/{len(flat_prompts):03d}] {label}: {prompt}", file=sys.stderr, flush=True)
+
             set_predictor_detection_threshold(predictor, detection_min_score)
 
             response = add_text_prompt(
@@ -203,7 +206,6 @@ def process_image(
         confidence=confidence,
         projection_dir=projection_dir,
         require_projection=require_projection,
-        projection_frame_id=projection_frame_id,
     )
     return ImageResult(
         image_path=image_path,
@@ -221,6 +223,7 @@ def process_image(
         projection_copy_path=projection_info.get("projection_copy"),
         mask_projection_path=projection_info.get("mask_projection"),
         projection_error=projection_info.get("projection_error"),
+        projection_frame_id=projection_frame_id,
     )
 
 
@@ -406,7 +409,7 @@ GEOMETRY_FILTER_RULES: dict[str, dict[str, float]] = {
     },
     "wheel_chock": {
         "min_y_bottom": 0.4,
-        "min_aspect_ratio": 1.0,
+        "min_aspect_ratio": 1.5,
     },
     "underground_parking_sign" : {
         "min_y_bottom": 0.4,
@@ -418,15 +421,20 @@ GEOMETRY_FILTER_RULES: dict[str, dict[str, float]] = {
     },
     "induction_sign" : {
         "min_y_bottom": 0.50,
-        "min_aspect_ratio": 4.0,
+        "min_aspect_ratio": 1.0,
+        "max_aspect_ratio": 4.0,
     },
     "parking_barrier_lock": {
-        "min_y_bottom": 0.50,
+        "min_y_bottom": 0.5,
         "min_aspect_ratio": 0,
     },
     "pillar_corner_guard": {
         "min_y_bottom": 0.2,
-        "min_aspect_ratio": 0.7,
+        "min_aspect_ratio": 0.9,
+    },
+    "height_restriction_barrel": {
+        "min_y_bottom": 0.4,
+        "min_aspect_ratio": 0.0,
     }
 }
 
@@ -457,6 +465,8 @@ def reject_instance_by_geometry(
     try:
         min_y_bottom = float(rule["min_y_bottom"])
         min_aspect_ratio = float(rule["min_aspect_ratio"])
+        if item.label == "induction_sign":
+            max_aspect_ratio = float(rule["max_aspect_ratio"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(
             f"Invalid geometry filter rule for label {item.label!r}: {rule!r}"
@@ -489,7 +499,7 @@ def reject_instance_by_geometry(
         return y_bottom > min_y_bottom or aspect_ratio < min_aspect_ratio
 
     if item.label in {"induction_sign"}:
-        return y_bottom > min_y_bottom or aspect_ratio >  min_aspect_ratio
+        return y_bottom > min_y_bottom or aspect_ratio >  max_aspect_ratio or aspect_ratio < min_aspect_ratio
 
     if item.label == "ground_markings":
         return y_bottom < min_y_bottom
@@ -499,6 +509,9 @@ def reject_instance_by_geometry(
 
     if item.label == "pillar_corner_guard":
         return y_bottom < min_y_bottom or aspect_ratio > min_aspect_ratio
+
+    if item.label == "height_restriction_barrel":
+        return y_bottom > min_y_bottom 
 
     return y_bottom < min_y_bottom or aspect_ratio < min_aspect_ratio
 
@@ -734,6 +747,10 @@ def instance_orientation_metadata(item: Sam3Instance) -> dict[str, Any]:
 
 
 
+def projection_lookup_path(image_path: Path, *, frame_id: str | None) -> Path:
+    if frame_id is None: 
+        return image_path
+    return image_path.with_name(f"{frame_id}{image_path.suffix}")
 
 def save_image_outputs(
     *,
@@ -848,7 +865,6 @@ def maybe_save_existing_mask_projection(
     frame_out: Path,
     projection_dir: Path | None,
     require_projection: bool,
-    projection_frame_id: str | None = None,
 ) -> dict[str, str | None] | None:
     if projection_dir is None:
         return None
@@ -867,7 +883,7 @@ def maybe_save_existing_mask_projection(
     semantic_color = make_semantic_color(semantic_mask)
     overlay = make_overlay(image_np, semantic_mask)
     return save_mask_projection_preview(
-        image_path=projection_lookup_path(image_path, frame_id=projection_frame_id),
+        image_path=image_path,
         output_dir=frame_out,
         projection_dir=projection_dir,
         image_np=image_np,
@@ -875,12 +891,6 @@ def maybe_save_existing_mask_projection(
         overlay=overlay,
         require_projection=require_projection,
     )
-
-
-def projection_lookup_path(image_path: Path, *, frame_id: str | None) -> Path:
-    if frame_id is None:
-        return image_path
-    return image_path.with_name(f"{frame_id}{image_path.suffix}")
 
 
 def save_mask_projection_preview(
@@ -1030,7 +1040,7 @@ def save_instances_npz(path: Path, instances: list[Sam3Instance], *, shape: tupl
             "orientation_probabilities": np.zeros((0, 3), dtype=np.float32),
             "orientation_fallback": np.zeros((0,), dtype=bool),
             "orientation_fallback_reasons": np.asarray([], dtype=str),
-
+            
         }
     np.savez_compressed(path, **payload)
 
@@ -1074,7 +1084,7 @@ def drew_instance_labels(
 
     image = Image.fromarray(np.asarray(overlay, dtype=np.uint8)).convert("RGB")
     draw = ImageDraw.Draw(image, "RGBA")
-    font = ImageFont.truetype("DejaVuSans.ttf", size=48)
+    font = ImageFont.truetype("DejaVuSans.ttf", size=24)
     height, width = semantic_mask.shape
 
     for item in sorted(instances, key=lambda value: value.score, reverse=True):
@@ -1090,7 +1100,7 @@ def drew_instance_labels(
         text_bbox = draw.textbbox((0, 0), text, font=font)
         text_width = text_bbox[2] - text_bbox[0]
         text_height = text_bbox[3] - text_bbox[1]
-        padding = 10
+        padding = 5
         box = [
             label_x,
             label_y,
@@ -1216,10 +1226,10 @@ def to_numpy(value: Any) -> np.ndarray | None:
     return np.asarray(value)
 
 
-def collect_images(image_dir: Path, *, recursive: bool) -> list[Path]:
+def collect_images(image_dir: Path) -> list[Path]:
     if not image_dir.is_dir():
         raise FileNotFoundError(f"Image directory does not exist: {image_dir}")
-    iterator = image_dir.rglob("*") if recursive else image_dir.iterdir()
+    iterator =  image_dir.iterdir()
     return sorted(path for path in iterator if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
 
 
@@ -1300,13 +1310,13 @@ def resolve_model_dir(*, sam3_root: Path | None, sam3_model_path: str | None) ->
 
 
 def build_predictor(
-    *,
-    model_dir: Path | None,
-    use_fa3: bool,
-    min_score: float,
-    inference_precision: str = "auto",
-    cache_visual_features: bool = False,
-) -> Any:
+        *,
+        model_dir: Path | None,
+        use_fa3: bool, 
+        min_score: float,
+        inference_precision: str = "auto",
+        cache_visual_features: bool = False,
+        ) -> Any:
     import sam3.model_builder as sam3_model_builder  # type: ignore # noqa: WPS433
 
     builder = sam3_model_builder.build_sam3_multiplex_video_predictor
@@ -1459,7 +1469,7 @@ def parse_args() -> argparse.Namespace:
 
 from collections import Counter
 
-def make_class_list(class_pixel_counts):
+def make_class_list(class_pixel_counts): 
     return list(class_pixel_counts.keys())
 
 
@@ -1477,6 +1487,8 @@ def classes_from_semantic_mask(
     return classes
 
 
+
+
 def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
                              sam3_root, sam3_model_path, min_score, projection_dir, label_min_scores = None,
                              recursive = None , max_images = None, max_prompts = None,
@@ -1484,10 +1496,10 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
                              validate = False, log_json = False, min_mask_size = 30,
                              vehicle_orientation_checkpoint = None, vehicle_orientation_device = "auto",
                              vehicle_orientation_min_confidence = 0.75, vehicle_orientation_min_margin = 0.10,
-                             vehicle_orientation_nms_iou = 0.80, vehicle_prompt_label = "vehicle",
+                             vehicle_orientation_nms_iou = 0.80, vehicle_prompt_label = "vehicle", 
                              sam3_only = False, prompt_log = False,
                              inference_precision = "auto", cache_visual_features = False,
-                             frame_image_pairs = None
+                             worker_index = 0, num_workers = 1, frame_image_pairs = None,
                              ) -> set[str]:
 
 
@@ -1593,11 +1605,6 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         if label in active_prompt_labels
     ]
 
-    if max_prompts is not None:
-        if max_prompts <= 0:
-            raise ValueError(f"--max-prompts must be positive, got {max_prompts}")
-        flat_prompts = flat_prompts[: max_prompts]
-
     print("routed_prompt_labels:", routed_prompt_labels)
     print("active_prompt_labels:", active_prompt_labels)
     print("flat_prompts:", flat_prompts)
@@ -1630,9 +1637,8 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         inference_precision=inference_precision,
         cache_visual_features=cache_visual_features,
     )
-
-    results = []
     detected_classes: set[str] = set()
+    results = []
     for index, (explicit_frame_id, image_path) in enumerate(image_records, start=1):
         frame_out = (
             out_dir / explicit_frame_id
@@ -1649,11 +1655,11 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
                 frame_out=frame_out,
                 projection_dir=projection_dir,
                 require_projection=require_projection,
-                projection_frame_id=explicit_frame_id,
             )
             metadata_path = frame_out / "metadata.json"
             if projection_info and metadata_path.is_file():
                 update_metadata(metadata_path, projection_info)
+
             detected_classes.update(
                 classes_from_semantic_mask(
                     frame_out / "semantic_mask.npy",
@@ -1686,7 +1692,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             label_to_id=label_to_id,
             label_min_scores=effective_label_min_scores,
             min_score=min_score,
-            prompt_log=prompt_log,
+            prompt_log=False,
             projection_dir=projection_dir,
             min_mask_size=min_mask_size,
             require_projection=require_projection,
@@ -1739,7 +1745,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
                 "predictions": list(result.orientation_predictions),
             },
         }
-
+ 
         if log_json:
             classes_log = build_classes_log(
                 result=result,
@@ -1787,7 +1793,11 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         "labels": label_to_id,
         "frames": results,
         "sam3_runtime": sam3_runtime_summary(predictor),
-        "physical_gpu_id": os.environ.get("SAM3_PHYSICAL_GPU_ID"),
+        "worker": {
+            "index": int(worker_index),
+            "count": int(num_workers),
+            "physical_gpu_id": os.environ.get("SAM3_PHYSICAL_GPU_ID"),
+        },
         "vehicle_orientation": {
             "enabled": vehicle_orientation_classifier is not None,
             "mode": vehicle_orientation_mode,

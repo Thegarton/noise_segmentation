@@ -14,7 +14,6 @@ from run_sam3_single_image_folder import collect_images, sam3_single_image_folde
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-
 @dataclass(frozen=True)
 class MatchedFrame:
     frame_id: str
@@ -23,7 +22,6 @@ class MatchedFrame:
     image_name: str
     image_timestamp: int
     diff_ms: float
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -85,7 +83,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-log", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--validate", action="store_true")
-    parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--max-images", type=int, default=None)
     parser.add_argument("--max-prompts", type=int, default=None)
     parser.add_argument("--log-json", action="store_true")
@@ -126,7 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Compute the single-image visual backbone once and reuse it for all text prompts.",
     )
-
+    parser.add_argument("--colour-correction", action="store_true")
     return parser
 
 
@@ -147,8 +144,6 @@ def parse_delimited_rows(path: str | Path, *, columns: int) -> list[list[str]]:
     rows: list[list[str]] = []
     for line_number, raw_line in enumerate(source.read_text(encoding="utf-8-sig").splitlines(), start=1):
         line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
         values = [value.strip() for value in line.split(">>")]
         if len(values) != columns or any(not value for value in values):
             raise ValueError(
@@ -161,8 +156,8 @@ def parse_delimited_rows(path: str | Path, *, columns: int) -> list[list[str]]:
     return rows
 
 
-def index_images(image_dir: Path, *, recursive: bool) -> dict[str, Path]:
-    image_paths = collect_images(image_dir, recursive=recursive)
+def index_images(image_dir: Path) -> dict[str, Path]:
+    image_paths = collect_images(image_dir)
     by_stem: dict[str, Path] = {}
     for image_path in image_paths:
         existing = by_stem.get(image_path.stem)
@@ -181,7 +176,6 @@ def load_matched_frames(
     img_match: str | Path,
     start_frame: int | None,
     end_frame: int | None,
-    recursive: bool,
 ) -> list[MatchedFrame]:
     if start_frame is not None and start_frame < 0:
         raise ValueError(f"--start-frame must be non-negative, got {start_frame}")
@@ -208,7 +202,7 @@ def load_matched_frames(
         time_by_name[image_name] = timestamp
 
     source_dir = Path(image_dir).expanduser().resolve()
-    images_by_stem = index_images(source_dir, recursive=recursive)
+    images_by_stem = index_images(source_dir)
     match_rows = parse_delimited_rows(img_match, columns=3)
     matches: list[MatchedFrame] = []
     seen_frames: set[str] = set()
@@ -279,19 +273,13 @@ def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame] | Non
         if args.start_frame is not None or args.end_frame is not None:
             raise ValueError("--start-frame/--end-frame require --img-time-map and --img-match")
         return None
-    matches = load_matched_frames(
+    return load_matched_frames(
         image_dir=args.image_dir,
         img_time_map=args.img_time_map,
         img_match=args.img_match,
         start_frame=args.start_frame,
         end_frame=args.end_frame,
-        recursive=args.recursive,
     )
-    if args.max_images is not None:
-        if args.max_images <= 0:
-            raise ValueError(f"--max-images must be positive, got {args.max_images}")
-        matches = matches[: args.max_images]
-    return matches
 
 
 def write_match_manifest(args: argparse.Namespace, matches: list[MatchedFrame]) -> Path:
@@ -384,7 +372,6 @@ def run_conversion(args: argparse.Namespace) -> None:
     try:
         from autolabeler.data.HL320_cameracalibration import (  # type: ignore
             save_converted_data,
-            save_converted_data_without_bin,
         )
     except ImportError as exc:
         raise ImportError(
@@ -392,14 +379,20 @@ def run_conversion(args: argparse.Namespace) -> None:
             "already contains prepared images."
         ) from exc
 
-    if args.without_bin:
-        if not args.image_folder_path:
-            raise ValueError("--image-folder-path is required with --without-bin")
-        save_converted_data_without_bin(args.image_folder_path, args.defisheye)
-    else:
-        if not args.folder_path or not args.output_folder_name:
-            raise ValueError("--folder_path and --output_folder_name are required for BIN conversion")
-        save_converted_data(args.folder_path, args.output_folder_name)
+    if not args.image_folder_path:
+        raise ValueError("--image-folder-path is required with --without-bin")
+    save_converted_data(args.image_folder_path, args.defisheye, args.colour_correction)
+    
+
+
+def count_selected_images(args: argparse.Namespace) -> int:
+    matches = selected_frame_matches(args)
+    paths = (
+        [match.image_path for match in matches]
+        if matches is not None
+        else collect_images(Path(args.image_dir).expanduser().resolve())
+    )
+    return len(paths)
 
 
 def run_sam3(args: argparse.Namespace, *, matches: list[MatchedFrame] | None) -> set[str]:
@@ -413,7 +406,6 @@ def run_sam3(args: argparse.Namespace, *, matches: list[MatchedFrame] | None) ->
         min_score=args.min_score,
         projection_dir=args.projection_dir,
         label_min_scores=args.label_min_scores,
-        recursive=args.recursive,
         max_images=args.max_images,
         max_prompts=args.max_prompts,
         use_fa3=args.use_fa3,
