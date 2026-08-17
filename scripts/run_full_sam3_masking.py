@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,16 @@ from run_sam3_single_image_folder import collect_images, sam3_single_image_folde
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@dataclass(frozen=True)
+class MatchedFrame:
+    frame_id: str
+    image_path: Path
+    image_reference: str
+    image_name: str
+    image_timestamp: int
+    diff_ms: float
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +39,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--image-dir", required=True, help="Directory with prepared camera images.")
     parser.add_argument("--out-dir", required=True, help="Output directory for per-image SAM3 results.")
+    parser.add_argument(
+        "--img-time-map",
+        default=None,
+        help=(
+            "TXT with '<image-name>>><timestamp>' rows. The zero-based row index may be "
+            "referenced by the second column of --img-match."
+        ),
+    )
+    parser.add_argument(
+        "--img-match",
+        default=None,
+        help="TXT with '<frame-id>>><image-index-or-name>>><diff-ms>' rows.",
+    )
+    parser.add_argument(
+        "--start-frame",
+        type=int,
+        default=None,
+        help="First frame id from --img-match to process (inclusive).",
+    )
+    parser.add_argument(
+        "--end-frame",
+        type=int,
+        default=None,
+        help="Last frame id from --img-match to process (inclusive).",
+    )
     parser.add_argument(
         "--prompt-config",
         default=str(REPO_ROOT / "configs" / "sam3_text_prompts_pointwise_v1.yaml"),
@@ -105,6 +141,181 @@ def parse_gpu_ids(value: str | None) -> list[str]:
     return gpu_ids
 
 
+def parse_delimited_rows(path: str | Path, *, columns: int) -> list[list[str]]:
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"Mapping file does not exist: {source}")
+
+    rows: list[list[str]] = []
+    for line_number, raw_line in enumerate(source.read_text(encoding="utf-8-sig").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        values = [value.strip() for value in line.split(">>")]
+        if len(values) != columns or any(not value for value in values):
+            raise ValueError(
+                f"Expected {columns} non-empty '>>'-separated values in "
+                f"{source}:{line_number}, got {raw_line!r}"
+            )
+        rows.append(values)
+    if not rows:
+        raise ValueError(f"Mapping file contains no data rows: {source}")
+    return rows
+
+
+def index_images(image_dir: Path, *, recursive: bool) -> dict[str, Path]:
+    image_paths = collect_images(image_dir, recursive=recursive)
+    by_stem: dict[str, Path] = {}
+    for image_path in image_paths:
+        existing = by_stem.get(image_path.stem)
+        if existing is not None:
+            raise ValueError(
+                f"Image stem {image_path.stem!r} is ambiguous: {existing} and {image_path}"
+            )
+        by_stem[image_path.stem] = image_path
+    return by_stem
+
+
+def load_matched_frames(
+    *,
+    image_dir: str | Path,
+    img_time_map: str | Path,
+    img_match: str | Path,
+    start_frame: int | None,
+    end_frame: int | None,
+    recursive: bool,
+) -> list[MatchedFrame]:
+    if start_frame is not None and start_frame < 0:
+        raise ValueError(f"--start-frame must be non-negative, got {start_frame}")
+    if end_frame is not None and end_frame < 0:
+        raise ValueError(f"--end-frame must be non-negative, got {end_frame}")
+    if start_frame is not None and end_frame is not None and start_frame > end_frame:
+        raise ValueError(
+            f"--start-frame ({start_frame}) must not exceed --end-frame ({end_frame})"
+        )
+
+    time_rows = parse_delimited_rows(img_time_map, columns=2)
+    time_entries: list[tuple[str, int]] = []
+    time_by_name: dict[str, int] = {}
+    for image_name, raw_timestamp in time_rows:
+        if image_name in time_by_name:
+            raise ValueError(f"Duplicate image name {image_name!r} in {img_time_map}")
+        try:
+            timestamp = int(raw_timestamp)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid timestamp {raw_timestamp!r} for image {image_name!r} in {img_time_map}"
+            ) from exc
+        time_entries.append((image_name, timestamp))
+        time_by_name[image_name] = timestamp
+
+    source_dir = Path(image_dir).expanduser().resolve()
+    images_by_stem = index_images(source_dir, recursive=recursive)
+    match_rows = parse_delimited_rows(img_match, columns=3)
+    matches: list[MatchedFrame] = []
+    seen_frames: set[str] = set()
+    for frame_id, image_reference, raw_diff_ms in match_rows:
+        try:
+            numeric_frame_id = int(frame_id)
+        except ValueError as exc:
+            raise ValueError(f"Frame id must be numeric in {img_match}, got {frame_id!r}") from exc
+        if start_frame is not None and numeric_frame_id < start_frame:
+            continue
+        if end_frame is not None and numeric_frame_id > end_frame:
+            continue
+        if frame_id in seen_frames:
+            raise ValueError(f"Duplicate frame id {frame_id!r} in {img_match}")
+        seen_frames.add(frame_id)
+
+        if image_reference in time_by_name:
+            image_name = image_reference
+            image_timestamp = time_by_name[image_name]
+        else:
+            try:
+                image_index = int(image_reference)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Image reference {image_reference!r} for frame {frame_id} is neither "
+                    "an image name nor a zero-based numeric index"
+                ) from exc
+            if image_index < 0 or image_index >= len(time_entries):
+                raise IndexError(
+                    f"Image index {image_index} for frame {frame_id} is outside "
+                    f"--img-time-map range [0, {len(time_entries)})"
+                )
+            image_name, image_timestamp = time_entries[image_index]
+
+        image_path = images_by_stem.get(image_name)
+        if image_path is None:
+            raise FileNotFoundError(
+                f"Image {image_name!r} selected for frame {frame_id} was not found in {source_dir}"
+            )
+        try:
+            diff_ms = float(raw_diff_ms)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid diff_ms {raw_diff_ms!r} for frame {frame_id} in {img_match}"
+            ) from exc
+        matches.append(
+            MatchedFrame(
+                frame_id=frame_id,
+                image_path=image_path,
+                image_reference=image_reference,
+                image_name=image_name,
+                image_timestamp=image_timestamp,
+                diff_ms=diff_ms,
+            )
+        )
+
+    if not matches:
+        range_description = f"[{start_frame or 0}, {end_frame if end_frame is not None else 'end'}]"
+        raise ValueError(f"No matched frames selected from {img_match} in range {range_description}")
+    return matches
+
+
+def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame] | None:
+    mapping_values = (args.img_time_map, args.img_match)
+    if any(mapping_values) and not all(mapping_values):
+        raise ValueError("--img-time-map and --img-match must be provided together")
+    if not all(mapping_values):
+        if args.start_frame is not None or args.end_frame is not None:
+            raise ValueError("--start-frame/--end-frame require --img-time-map and --img-match")
+        return None
+    return load_matched_frames(
+        image_dir=args.image_dir,
+        img_time_map=args.img_time_map,
+        img_match=args.img_match,
+        start_frame=args.start_frame,
+        end_frame=args.end_frame,
+        recursive=args.recursive,
+    )
+
+
+def write_match_manifest(args: argparse.Namespace, matches: list[MatchedFrame]) -> Path:
+    output_dir = Path(args.out_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "image_dir": str(Path(args.image_dir).expanduser().resolve()),
+        "img_time_map": str(Path(args.img_time_map).expanduser().resolve()),
+        "img_match": str(Path(args.img_match).expanduser().resolve()),
+        "start_frame": args.start_frame,
+        "end_frame": args.end_frame,
+        "frames": [
+            {
+                **asdict(match),
+                "image_path": str(match.image_path),
+            }
+            for match in matches
+        ],
+    }
+    path = output_dir / "sam3_image_match_manifest.json"
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary_path.replace(path)
+    return path
+
+
 def run_conversion(args: argparse.Namespace) -> None:
     if args.skip_conversion:
         return
@@ -130,7 +341,12 @@ def run_conversion(args: argparse.Namespace) -> None:
 
 
 def count_selected_images(args: argparse.Namespace) -> int:
-    paths = collect_images(Path(args.image_dir).expanduser().resolve(), recursive=args.recursive)
+    matches = selected_frame_matches(args)
+    paths = (
+        [match.image_path for match in matches]
+        if matches is not None
+        else collect_images(Path(args.image_dir).expanduser().resolve(), recursive=args.recursive)
+    )
     if args.max_images is not None:
         if args.max_images <= 0:
             raise ValueError(f"--max-images must be positive, got {args.max_images}")
@@ -142,6 +358,7 @@ def count_selected_images(args: argparse.Namespace) -> int:
 
 def run_sam3_worker(args: argparse.Namespace) -> None:
     worker_index = 0 if args.worker_index is None else int(args.worker_index)
+    matches = selected_frame_matches(args)
     sam3_single_image_folder(
         image_dir=args.image_dir,
         out_dir=args.out_dir,
@@ -173,6 +390,9 @@ def run_sam3_worker(args: argparse.Namespace) -> None:
         cache_visual_features=args.cache_visual_features,
         worker_index=worker_index,
         num_workers=args.num_workers,
+        frame_image_pairs=None
+        if matches is None
+        else [(match.frame_id, match.image_path) for match in matches],
     )
 
 
@@ -264,7 +484,7 @@ def merge_worker_manifests(out_dir: str | Path, *, num_workers: int) -> Path:
 
     combined = dict(manifests[0])
     frames = [frame for manifest in manifests for frame in manifest.get("frames", [])]
-    frames.sort(key=lambda item: (str(item.get("image", "")), str(item.get("frame_id", ""))))
+    frames.sort(key=lambda item: (str(item.get("frame_id", "")), str(item.get("image", ""))))
     combined["images"] = len(frames)
     combined["frames"] = frames
     combined.pop("worker", None)
@@ -325,6 +545,20 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     run_conversion(args)
+    matches = selected_frame_matches(args)
+    if matches is not None:
+        match_manifest = write_match_manifest(args, matches)
+        print(
+            json.dumps(
+                {
+                    "matched_frames": len(matches),
+                    "first_frame": matches[0].frame_id,
+                    "last_frame": matches[-1].frame_id,
+                    "match_manifest": str(match_manifest),
+                },
+                indent=2,
+            )
+        )
     gpu_ids = parse_gpu_ids(args.gpu_ids)
     if gpu_ids:
         num_workers = launch_gpu_workers(args, gpu_ids, original_argv)

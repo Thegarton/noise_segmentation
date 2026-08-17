@@ -30,6 +30,65 @@ def test_build_worker_command_keeps_original_args() -> None:
     assert "0,1" in command
 
 
+def test_load_matched_frames_resolves_zero_based_time_map_index(tmp_path: Path) -> None:
+    script = load_script()
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    time_rows = []
+    for index in range(81):
+        image_name = f"{16926 + index:06d}"
+        time_rows.append(f"{image_name}>>{1786519580000000 + index}")
+        if index >= 79:
+            (image_dir / f"{image_name}.jpg").write_bytes(b"image")
+
+    time_map = tmp_path / "imgTimeMap.txt"
+    time_map.write_text("\n".join(time_rows), encoding="utf-8")
+    match_map = tmp_path / "imgMatch.txt"
+    match_map.write_text(
+        "000125>>000079>>-2\n"
+        "000126>>000080>>7\n",
+        encoding="utf-8",
+    )
+
+    matches = script.load_matched_frames(
+        image_dir=image_dir,
+        img_time_map=time_map,
+        img_match=match_map,
+        start_frame=126,
+        end_frame=126,
+        recursive=False,
+    )
+
+    assert len(matches) == 1
+    assert matches[0].frame_id == "000126"
+    assert matches[0].image_reference == "000080"
+    assert matches[0].image_name == "017006"
+    assert matches[0].image_path == (image_dir / "017006.jpg").resolve()
+    assert matches[0].diff_ms == 7.0
+
+
+def test_load_matched_frames_accepts_image_name_from_time_map(tmp_path: Path) -> None:
+    script = load_script()
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    (image_dir / "017006.png").write_bytes(b"image")
+    time_map = tmp_path / "imgTimeMap.txt"
+    time_map.write_text("017006>>1786519583605000\n", encoding="utf-8")
+    match_map = tmp_path / "imgMatch.txt"
+    match_map.write_text("000126>>017006>>7\n", encoding="utf-8")
+
+    matches = script.load_matched_frames(
+        image_dir=image_dir,
+        img_time_map=time_map,
+        img_match=match_map,
+        start_frame=None,
+        end_frame=None,
+        recursive=False,
+    )
+
+    assert [(item.frame_id, item.image_name) for item in matches] == [("000126", "017006")]
+
+
 def test_merge_worker_manifests_sorts_frames(tmp_path: Path) -> None:
     script = load_script()
     for worker_index, frame_id in [(0, "000002"), (1, "000001")]:
@@ -63,4 +122,3 @@ def load_script():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
-

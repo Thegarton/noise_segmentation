@@ -103,6 +103,7 @@ def process_image(
     projection_dir: Path | None,
     min_mask_size: int,
     require_projection: bool,
+    projection_frame_id: str | None = None,
     vehicle_orientation_classifier: Any | None = None,
     vehicle_prompt_label: str = "vehicle",
     vehicle_class_mapping: dict[str, tuple[str, int]] | None = None,
@@ -202,6 +203,7 @@ def process_image(
         confidence=confidence,
         projection_dir=projection_dir,
         require_projection=require_projection,
+        projection_frame_id=projection_frame_id,
     )
     return ImageResult(
         image_path=image_path,
@@ -744,6 +746,7 @@ def save_image_outputs(
     confidence: np.ndarray,
     projection_dir: Path | None = None,
     require_projection: bool = False,
+    projection_frame_id: str | None = None,
 ) -> dict[str, str | None]:
     from PIL import Image  # noqa: WPS433
 
@@ -766,7 +769,7 @@ def save_image_outputs(
     Image.fromarray(make_preview(image_np, semantic_color, overlay)).save(output_dir / "preview.jpg", quality=95)
 
     projection_info = save_mask_projection_preview(
-        image_path=image_path,
+        image_path=projection_lookup_path(image_path, frame_id=projection_frame_id),
         output_dir=output_dir,
         projection_dir=projection_dir,
         image_np=image_np,
@@ -845,6 +848,7 @@ def maybe_save_existing_mask_projection(
     frame_out: Path,
     projection_dir: Path | None,
     require_projection: bool,
+    projection_frame_id: str | None = None,
 ) -> dict[str, str | None] | None:
     if projection_dir is None:
         return None
@@ -863,7 +867,7 @@ def maybe_save_existing_mask_projection(
     semantic_color = make_semantic_color(semantic_mask)
     overlay = make_overlay(image_np, semantic_mask)
     return save_mask_projection_preview(
-        image_path=image_path,
+        image_path=projection_lookup_path(image_path, frame_id=projection_frame_id),
         output_dir=frame_out,
         projection_dir=projection_dir,
         image_np=image_np,
@@ -871,6 +875,12 @@ def maybe_save_existing_mask_projection(
         overlay=overlay,
         require_projection=require_projection,
     )
+
+
+def projection_lookup_path(image_path: Path, *, frame_id: str | None) -> Path:
+    if frame_id is None:
+        return image_path
+    return image_path.with_name(f"{frame_id}{image_path.suffix}")
 
 
 def save_mask_projection_preview(
@@ -1478,7 +1488,8 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
                              vehicle_orientation_nms_iou = 0.80, vehicle_prompt_label = "vehicle",
                              sam3_only = False, prompt_log = False,
                              inference_precision = "auto", cache_visual_features = False,
-                             worker_index = 0, num_workers = 1
+                             worker_index = 0, num_workers = 1,
+                             frame_image_pairs = None
                              ) -> None:
 
 
@@ -1493,17 +1504,33 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         raise FileNotFoundError(f"Projection directory does not exist: {projection_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    image_paths = collect_images(image_dir, recursive=recursive)
+    if frame_image_pairs is None:
+        image_records = [
+            (None, image_path)
+            for image_path in collect_images(image_dir, recursive=recursive)
+        ]
+    else:
+        image_records = []
+        seen_frame_ids: set[str] = set()
+        for raw_frame_id, raw_image_path in frame_image_pairs:
+            frame_id = str(raw_frame_id)
+            image_path = Path(raw_image_path).expanduser().resolve()
+            if frame_id in seen_frame_ids:
+                raise ValueError(f"Duplicate explicit frame id: {frame_id!r}")
+            if not image_path.is_file():
+                raise FileNotFoundError(f"Matched image does not exist: {image_path}")
+            seen_frame_ids.add(frame_id)
+            image_records.append((frame_id, image_path))
     if max_images is not None:
         if max_images <= 0:
             raise ValueError(f"--max-images must be positive, got {max_images}")
-        image_paths = image_paths[: max_images]
-    image_paths = shard_image_paths(
-        image_paths,
+        image_records = image_records[: max_images]
+    image_records = shard_image_paths(
+        image_records,
         worker_index=int(worker_index),
         num_workers=int(num_workers),
     )
-    if not image_paths:
+    if not image_records:
         raise ValueError(
             f"Worker {worker_index}/{num_workers} received no images from {image_dir}"
         )
@@ -1614,8 +1641,12 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
     )
 
     results = []
-    for index, image_path in enumerate(image_paths, start=1):
-        frame_out = output_dir_for_image(out_dir, image_dir, image_path, recursive=recursive)
+    for index, (explicit_frame_id, image_path) in enumerate(image_records, start=1):
+        frame_out = (
+            out_dir / explicit_frame_id
+            if explicit_frame_id is not None
+            else output_dir_for_image(out_dir, image_dir, image_path, recursive=recursive)
+        )
         if outputs_exist(
             frame_out,
             projection_enabled=projection_dir is not None,
@@ -1626,6 +1657,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
                 frame_out=frame_out,
                 projection_dir=projection_dir,
                 require_projection=require_projection,
+                projection_frame_id=explicit_frame_id,
             )
             metadata_path = frame_out / "metadata.json"
             if projection_info and metadata_path.is_file():
@@ -1643,7 +1675,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
 
         worker_prefix = f"[worker {worker_index + 1}/{num_workers}] " if num_workers > 1 else ""
         print(
-            f"{worker_prefix}[{index:04d}/{len(image_paths):04d}] {image_path}",
+            f"{worker_prefix}[{index:04d}/{len(image_records):04d}] {image_path}",
             file=sys.stderr,
             flush=True,
         )
@@ -1660,6 +1692,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
             projection_dir=projection_dir,
             min_mask_size=min_mask_size,
             require_projection=require_projection,
+            projection_frame_id=explicit_frame_id,
             vehicle_orientation_classifier=vehicle_orientation_classifier,
             vehicle_prompt_label=vehicle_prompt_label,
             vehicle_class_mapping=vehicle_class_mapping,
@@ -1670,6 +1703,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         processing_time_seconds = time.perf_counter() - frame_started_at
         metadata = {
             "version": 1,
+            "frame_id": frame_out.name,
             "image_path": str(result.image_path),
             "image_size": [result.image_size[0], result.image_size[1]],
             "sam3_root": str(sam3_root) if sam3_root is not None else None,
@@ -1752,7 +1786,7 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
         "label_min_scores_file": str(Path(label_min_scores).expanduser().resolve()) if label_min_scores else None,
         "label_min_score_overrides": label_min_score_overrides,
         "effective_label_min_scores": effective_label_min_scores,
-        "images": len(image_paths),
+        "images": len(image_records),
         "prompts": len(flat_prompts),
         "mask_nms_iou": float(vehicle_orientation_nms_iou),
         "labels": label_to_id,
@@ -1788,4 +1822,4 @@ def sam3_single_image_folder(image_dir, out_dir, prompt_config, classes_yaml,
     )
     manifest_path = out_dir / manifest_name
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"images": len(image_paths), "manifest": str(manifest_path)}, indent=2))
+    print(json.dumps({"images": len(image_records), "manifest": str(manifest_path)}, indent=2))
