@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import csv
 import importlib.util
 import json
 import sys
@@ -87,6 +89,56 @@ def test_load_matched_frames_accepts_image_name_from_time_map(tmp_path: Path) ->
     )
 
     assert [(item.frame_id, item.image_name) for item in matches] == [("000126", "017006")]
+
+
+def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -> None:
+    script = load_script()
+    frames = []
+    matches = []
+    for index, (frame_id, class_list, timestamp) in enumerate(
+        [
+            ("000080", ["epoxy_floor", "front_of_vehicle"], 1000),
+            ("000081", ["front_of_vehicle", "ground_markings"], 2000),
+        ]
+    ):
+        frame_dir = tmp_path / frame_id
+        frame_dir.mkdir()
+        (frame_dir / "classes_log.json").write_text(
+            json.dumps({"class_list": class_list}),
+            encoding="utf-8",
+        )
+        frames.append({"frame_id": frame_id, "image": f"/{index:06d}.jpg"})
+        matches.append(
+            script.MatchedFrame(
+                frame_id=frame_id,
+                image_path=Path(f"/{index:06d}.jpg"),
+                image_reference=f"{index:06d}",
+                image_name=f"{index:06d}",
+                image_timestamp=timestamp,
+                diff_ms=0.0,
+            )
+        )
+    (tmp_path / "sam3_single_image_folder_manifest.json").write_text(
+        json.dumps({"frames": frames}),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(out_dir=str(tmp_path), data_name=None)
+
+    summary_path = script.write_run_summary_csv(args, matches=matches)
+
+    with summary_path.open(encoding="utf-8", newline="") as stream:
+        row = next(csv.DictReader(stream))
+    assert json.loads(row["classes"]) == [
+        "epoxy_floor",
+        "front_of_vehicle",
+        "ground_markings",
+    ]
+    assert row["data_name"] == "data_name"
+    assert row["start_frame"] == "000080"
+    assert row["end_frame"] == "000081"
+    assert row["start_timestamp"] == "1000"
+    assert row["end_timestamp"] == "2000"
+    assert row["frame_num"] == "2"
 
 
 def test_merge_worker_manifests_sorts_frames(tmp_path: Path) -> None:

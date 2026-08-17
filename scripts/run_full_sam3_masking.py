@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import subprocess
@@ -39,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--image-dir", required=True, help="Directory with prepared camera images.")
     parser.add_argument("--out-dir", required=True, help="Output directory for per-image SAM3 results.")
+    parser.add_argument(
+        "--data-name",
+        default=None,
+        help="Dataset name written to sam3_run_summary.csv. Default: data_name.",
+    )
     parser.add_argument(
         "--img-time-map",
         default=None,
@@ -281,7 +287,7 @@ def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame] | Non
         if args.start_frame is not None or args.end_frame is not None:
             raise ValueError("--start-frame/--end-frame require --img-time-map and --img-match")
         return None
-    return load_matched_frames(
+    matches = load_matched_frames(
         image_dir=args.image_dir,
         img_time_map=args.img_time_map,
         img_match=args.img_match,
@@ -289,6 +295,11 @@ def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame] | Non
         end_frame=args.end_frame,
         recursive=args.recursive,
     )
+    if args.max_images is not None:
+        if args.max_images <= 0:
+            raise ValueError(f"--max-images must be positive, got {args.max_images}")
+        matches = matches[: args.max_images]
+    return matches
 
 
 def write_match_manifest(args: argparse.Namespace, matches: list[MatchedFrame]) -> Path:
@@ -314,6 +325,78 @@ def write_match_manifest(args: argparse.Namespace, matches: list[MatchedFrame]) 
     temporary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary_path.replace(path)
     return path
+
+
+def collect_run_classes(out_dir: Path, *, frame_ids: list[str]) -> list[str]:
+    classes: list[str] = []
+    seen: set[str] = set()
+    for frame_id in frame_ids:
+        classes_log_path = out_dir / frame_id / "classes_log.json"
+        if not classes_log_path.is_file():
+            continue
+        payload = json.loads(classes_log_path.read_text(encoding="utf-8"))
+        class_list = payload.get("class_list", [])
+        if not isinstance(class_list, list):
+            raise ValueError(f"class_list must be a list in {classes_log_path}")
+        for raw_class_name in class_list:
+            class_name = str(raw_class_name)
+            if class_name not in seen:
+                seen.add(class_name)
+                classes.append(class_name)
+    return classes
+
+
+def write_run_summary_csv(
+    args: argparse.Namespace,
+    *,
+    matches: list[MatchedFrame] | None,
+) -> Path:
+    out_dir = Path(args.out_dir).expanduser().resolve()
+    manifest_path = out_dir / "sam3_single_image_folder_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Missing final SAM3 manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    frame_ids = [str(frame["frame_id"]) for frame in manifest.get("frames", [])]
+    if not frame_ids:
+        raise ValueError(f"Final SAM3 manifest contains no frames: {manifest_path}")
+
+    classes = collect_run_classes(out_dir, frame_ids=frame_ids)
+    matches_by_frame = {} if matches is None else {match.frame_id: match for match in matches}
+    first_match = matches_by_frame.get(frame_ids[0])
+    last_match = matches_by_frame.get(frame_ids[-1])
+    data_name = str(args.data_name).strip() if args.data_name is not None else ""
+    if not data_name:
+        data_name = "data_name"
+
+    summary_path = out_dir / "sam3_run_summary.csv"
+    temporary_path = summary_path.with_suffix(summary_path.suffix + ".tmp")
+    with temporary_path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=[
+                "classes",
+                "data_name",
+                "start_frame",
+                "end_frame",
+                "start_timestamp",
+                "end_timestamp",
+                "frame_num",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "classes": json.dumps(classes, ensure_ascii=False),
+                "data_name": data_name,
+                "start_frame": frame_ids[0],
+                "end_frame": frame_ids[-1],
+                "start_timestamp": "" if first_match is None else first_match.image_timestamp,
+                "end_timestamp": "" if last_match is None else last_match.image_timestamp,
+                "frame_num": len(frame_ids),
+            }
+        )
+    temporary_path.replace(summary_path)
+    return summary_path
 
 
 def run_conversion(args: argparse.Namespace) -> None:
@@ -567,6 +650,8 @@ def main(argv: list[str] | None = None) -> None:
     else:
         run_sam3_worker(args)
     collect_review_images(args.out_dir)
+    summary_path = write_run_summary_csv(args, matches=matches)
+    print(json.dumps({"run_summary": str(summary_path)}, indent=2))
 
 
 if __name__ == "__main__":
