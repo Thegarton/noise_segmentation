@@ -9,7 +9,11 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from run_sam3_single_image_folder import collect_images, sam3_single_image_folder
+from run_sam3_single_image_folder import (
+    FolderDetectionSummary,
+    collect_images,
+    sam3_single_image_folder,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +101,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-json", action="store_true")
     parser.add_argument("--min-mask-size", type=int, default=30)
     parser.add_argument("--defisheye", action="store_true")
+    parser.add_argument(
+        "--class-min-frames",
+        type=int,
+        default=1,
+        help=(
+            "Write a class to sam3_run_summary.csv only when it is present in at "
+            "least this many processed images."
+        ),
+    )
+    parser.add_argument(
+        "--class-min-consecutive-frames",
+        type=int,
+        default=1,
+        help=(
+            "Additionally require a class to be present in at least this many "
+            "consecutive processed images. Default 1 disables the extra restriction."
+        ),
+    )
 
     parser.add_argument("--vehicle-orientation-checkpoint", default=None)
     parser.add_argument("--vehicle-prompt-label", default="vehicle")
@@ -322,6 +344,7 @@ def write_run_summary_csv(
     args: argparse.Namespace,
     *,
     detected_classes: set[str],
+    frame_class_presence: tuple[frozenset[str], ...] | list[set[str]] | None = None,
     matches: list[MatchedFrame] | None,
 ) -> Path:
     out_dir = Path(args.out_dir).expanduser().resolve()
@@ -342,6 +365,27 @@ def write_run_summary_csv(
     if not frame_ids:
         raise ValueError("Cannot write run summary because no input frames were selected")
 
+    min_frames = int(getattr(args, "class_min_frames", 1))
+    min_consecutive_frames = int(getattr(args, "class_min_consecutive_frames", 1))
+    if min_frames <= 0:
+        raise ValueError(f"--class-min-frames must be positive, got {min_frames}")
+    if min_consecutive_frames <= 0:
+        raise ValueError(
+            "--class-min-consecutive-frames must be positive, "
+            f"got {min_consecutive_frames}"
+        )
+
+    if frame_class_presence is None:
+        frame_class_presence = [set(detected_classes)]
+    class_stats = summarize_class_presence(frame_class_presence)
+    filtered_classes = sorted(
+        label
+        for label in detected_classes
+        if class_stats.get(label, {}).get("frame_count", 0) >= min_frames
+        and class_stats.get(label, {}).get("max_consecutive_frames", 0)
+        >= min_consecutive_frames
+    )
+
     data_name = str(args.data_name).strip() if args.data_name is not None else ""
     if not data_name:
         data_name = "data_name"
@@ -359,18 +403,38 @@ def write_run_summary_csv(
                 "start_timestamp",
                 "end_timestamp",
                 "frame_num",
+                "class_min_frames",
+                "class_min_consecutive_frames",
+                "class_frame_counts",
+                "class_max_consecutive_frames",
             ],
         )
         writer.writeheader()
         writer.writerow(
             {
-                "classes": json.dumps(sorted(detected_classes), ensure_ascii=False),
+                "classes": json.dumps(filtered_classes, ensure_ascii=False),
                 "data_name": data_name,
                 "start_frame": frame_ids[0],
                 "end_frame": frame_ids[-1],
                 "start_timestamp": start_timestamp,
                 "end_timestamp": end_timestamp,
                 "frame_num": len(frame_ids),
+                "class_min_frames": min_frames,
+                "class_min_consecutive_frames": min_consecutive_frames,
+                "class_frame_counts": json.dumps(
+                    {
+                        label: stats["frame_count"]
+                        for label, stats in sorted(class_stats.items())
+                    },
+                    ensure_ascii=False,
+                ),
+                "class_max_consecutive_frames": json.dumps(
+                    {
+                        label: stats["max_consecutive_frames"]
+                        for label, stats in sorted(class_stats.items())
+                    },
+                    ensure_ascii=False,
+                ),
             }
         )
     temporary_path.replace(summary_path)
@@ -402,7 +466,34 @@ def run_preprocessing(args: argparse.Namespace) -> None:
     )
 
 
-def run_sam3(args: argparse.Namespace, *, matches: list[MatchedFrame] | None) -> set[str]:
+def summarize_class_presence(
+    frame_class_presence: tuple[frozenset[str], ...] | list[set[str]],
+) -> dict[str, dict[str, int]]:
+    labels = sorted({label for frame_classes in frame_class_presence for label in frame_classes})
+    summary: dict[str, dict[str, int]] = {}
+    for label in labels:
+        frame_count = 0
+        current_run = 0
+        max_run = 0
+        for frame_classes in frame_class_presence:
+            if label in frame_classes:
+                frame_count += 1
+                current_run += 1
+                max_run = max(max_run, current_run)
+            else:
+                current_run = 0
+        summary[label] = {
+            "frame_count": frame_count,
+            "max_consecutive_frames": max_run,
+        }
+    return summary
+
+
+def run_sam3(
+    args: argparse.Namespace,
+    *,
+    matches: list[MatchedFrame] | None,
+) -> FolderDetectionSummary:
     return sam3_single_image_folder(
         image_dir=args.image_dir,
         out_dir=args.out_dir,
@@ -473,10 +564,11 @@ def main(argv: list[str] | None = None) -> None:
                 indent=2,
             )
         )
-    detected_classes = run_sam3(args, matches=matches)
+    detection_summary = run_sam3(args, matches=matches)
     summary_path = write_run_summary_csv(
         args,
-        detected_classes=detected_classes,
+        detected_classes=set(detection_summary.detected_classes),
+        frame_class_presence=detection_summary.frame_class_presence,
         matches=matches,
     )
     print(json.dumps({"run_summary": str(summary_path)}, indent=2))

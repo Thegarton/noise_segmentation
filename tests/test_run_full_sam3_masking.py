@@ -109,6 +109,10 @@ def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -
     summary_path = script.write_run_summary_csv(
         args,
         detected_classes={"ground_markings", "front_of_vehicle", "epoxy_floor"},
+        frame_class_presence=[
+            {"ground_markings", "front_of_vehicle"},
+            {"front_of_vehicle", "epoxy_floor"},
+        ],
         matches=matches,
     )
 
@@ -125,6 +129,55 @@ def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -
     assert row["start_timestamp"] == "1000"
     assert row["end_timestamp"] == "2000"
     assert row["frame_num"] == "2"
+    assert json.loads(row["class_frame_counts"]) == {
+        "epoxy_floor": 1,
+        "front_of_vehicle": 2,
+        "ground_markings": 1,
+    }
+
+
+def test_write_run_summary_csv_filters_by_count_and_consecutive_frames(tmp_path: Path) -> None:
+    script = load_script()
+    args = argparse.Namespace(
+        out_dir=str(tmp_path),
+        image_dir=str(tmp_path),
+        recursive=False,
+        max_images=None,
+        data_name="sequence",
+        class_min_frames=3,
+        class_min_consecutive_frames=2,
+    )
+    for frame_id in range(5):
+        (tmp_path / f"{frame_id:06d}.jpg").write_bytes(b"image")
+
+    frame_class_presence = [
+        {"consecutive", "scattered"},
+        {"consecutive"},
+        {"consecutive", "scattered", "too_rare"},
+        set(),
+        {"scattered"},
+    ]
+    summary_path = script.write_run_summary_csv(
+        args,
+        detected_classes={"consecutive", "scattered", "too_rare"},
+        frame_class_presence=frame_class_presence,
+        matches=None,
+    )
+
+    with summary_path.open(encoding="utf-8", newline="") as stream:
+        row = next(csv.DictReader(stream))
+
+    assert json.loads(row["classes"]) == ["consecutive"]
+    assert json.loads(row["class_frame_counts"]) == {
+        "consecutive": 3,
+        "scattered": 3,
+        "too_rare": 1,
+    }
+    assert json.loads(row["class_max_consecutive_frames"]) == {
+        "consecutive": 3,
+        "scattered": 1,
+        "too_rare": 1,
+    }
 
 
 def load_script():

@@ -86,6 +86,14 @@ class ImageResult:
     overlay_instances: tuple[Sam3Instance, ...] = ()
     orientation_predictions: tuple[dict[str, Any], ...] = ()
 
+
+@dataclass(frozen=True)
+class FolderDetectionSummary:
+    detected_classes: frozenset[str]
+    frame_ids: tuple[str, ...]
+    frame_class_presence: tuple[frozenset[str], ...]
+
+
 def process_image(
     *,
     predictor: Any,
@@ -1313,7 +1321,7 @@ def sam3_single_image_folder(
     inference_precision="auto",
     cache_visual_features=False,
     frame_image_pairs=None,
-) -> set[str]:
+) -> FolderDetectionSummary:
 
 
     validate_probability(vehicle_orientation_min_confidence, name="vehicle_orientation_min_confidence")
@@ -1448,6 +1456,8 @@ def sam3_single_image_folder(
         cache_visual_features=cache_visual_features,
     )
     detected_classes: set[str] = set()
+    processed_frame_ids: list[str] = []
+    frame_class_presence: list[frozenset[str]] = []
     results = []
     for index, (explicit_frame_id, image_path) in enumerate(image_records, start=1):
         frame_out = (
@@ -1460,13 +1470,14 @@ def sam3_single_image_folder(
             classes_log_enabled=log_json,
         ) and not overwrite:
             metadata_path = frame_out / "metadata.json"
-            detected_classes.update(
-                classes_from_semantic_mask(
-                    frame_out / "semantic_mask.npy",
-                    label_to_id=label_to_id,
-                    min_mask_size=min_mask_size,
-                )
+            frame_classes = classes_from_semantic_mask(
+                frame_out / "semantic_mask.npy",
+                label_to_id=label_to_id,
+                min_mask_size=min_mask_size,
             )
+            detected_classes.update(frame_classes)
+            processed_frame_ids.append(frame_out.name)
+            frame_class_presence.append(frozenset(frame_classes))
             results.append(
                 {
                     "image": str(image_path),
@@ -1502,7 +1513,10 @@ def sam3_single_image_folder(
             vehicle_orientation_nms_iou=vehicle_orientation_nms_iou,
         )
         processing_time_seconds = time.perf_counter() - frame_started_at
-        detected_classes.update(result.class_pixel_counts)
+        frame_classes = frozenset(result.class_pixel_counts)
+        detected_classes.update(frame_classes)
+        processed_frame_ids.append(frame_out.name)
+        frame_class_presence.append(frame_classes)
         metadata = {
             "version": 1,
             "frame_id": frame_out.name,
@@ -1605,4 +1619,8 @@ def sam3_single_image_folder(
     manifest_path = out_dir / "sam3_single_image_folder_manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"images": len(image_records), "manifest": str(manifest_path)}, indent=2))
-    return detected_classes
+    return FolderDetectionSummary(
+        detected_classes=frozenset(detected_classes),
+        frame_ids=tuple(processed_frame_ids),
+        frame_class_presence=tuple(frame_class_presence),
+    )
