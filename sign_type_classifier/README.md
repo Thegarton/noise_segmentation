@@ -63,6 +63,11 @@ and gray-world correction as the main HL320 pipeline, then passes the corrected
 RGB frame directly to SAM3 in memory. It does not save a corrected full-frame
 image; the copied source image remains unchanged.
 
+Label-specific normalized XYWH geometry filters run before cross-prompt mask
+clustering. They are enabled by default so rejected detections cannot affect
+the class score vector. Use `--no-geometry-filters` for comparison runs. Per
+frame rejection details are stored in `dataset_manifest.json` under `sources`.
+
 The builder atomically checkpoints `manifest.jsonl` and
 `generation_state.json` after every completed source frame. Resume an
 interrupted run with the same parameters:

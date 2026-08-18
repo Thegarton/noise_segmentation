@@ -32,6 +32,12 @@ from sign_type_classifier.dataset import (  # noqa: E402
     summarize_manifest,
     write_jsonl,
 )
+from sign_type_classifier.detection_filters import (  # noqa: E402
+    GEOMETRY_FILTER_RULES,
+    SIZE_FILTER_RULES,
+    filter_detections,
+    rejection_to_json,
+)
 from sign_type_classifier.features import (  # noqa: E402
     SignCrops,
     build_numeric_features,
@@ -143,8 +149,13 @@ def main() -> None:
         if args.colour_correction:
             detection_kwargs["image_rgb"] = image_rgb
         raw_detections = detector.detect_labeled(source_path, **detection_kwargs)
+        accepted_detections, rejected_detections = (
+            filter_detections(raw_detections)
+            if args.geometry_filters
+            else (list(raw_detections), [])
+        )
         candidates = cluster_sign_detections(
-            raw_detections,
+            accepted_detections,
             class_names=CLASS_NAMES,
             min_mask_size=args.min_mask_size,
             iou_threshold=args.cluster_iou,
@@ -202,6 +213,9 @@ def main() -> None:
             "image_size": [int(image_rgb.shape[1]), int(image_rgb.shape[0])],
             "colour_correction": bool(args.colour_correction),
             "raw_detections": len(raw_detections),
+            "accepted_detections": len(accepted_detections),
+            "rejected_detections": len(rejected_detections),
+            "detection_rejections": [rejection_to_json(item) for item in rejected_detections],
             "candidate_instances": len(candidates),
             "class_counts": dict(sorted(label_counts.items())),
             "timing_seconds": {
@@ -248,6 +262,9 @@ def main() -> None:
         "sam3_model_path": str(Path(args.sam3_model_path).expanduser().resolve()),
         "cache_visual_features": bool(args.cache_visual_features),
         "colour_correction": bool(args.colour_correction),
+        "geometry_filters": bool(args.geometry_filters),
+        "geometry_filter_rules": GEOMETRY_FILTER_RULES,
+        "size_filter_rules": SIZE_FILTER_RULES,
         "min_score": float(args.min_score),
         "min_mask_size": int(args.min_mask_size),
         "cluster_iou": float(args.cluster_iou),
@@ -324,6 +341,7 @@ def build_run_signature(*, source_root: Path, prompt_config: Path, args: argpars
         "context_scale": float(args.context_scale),
         "sam3_model_path": str(Path(args.sam3_model_path).expanduser().resolve()),
         "colour_correction": bool(getattr(args, "colour_correction", False)),
+        "geometry_filters": bool(getattr(args, "geometry_filters", True)),
     }
 
 
@@ -661,6 +679,12 @@ def parse_args() -> argparse.Namespace:
             "Apply OpenCV SimpleWB (P=0.5) and gray-world correction in memory "
             "before SAM3; no corrected full-frame image is saved."
         ),
+    )
+    parser.add_argument(
+        "--geometry-filters",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Filter detections with label-specific normalized XYWH geometry rules.",
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--overwrite", action="store_true")

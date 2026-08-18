@@ -23,6 +23,11 @@ from sign_type_classifier.dataset import (  # noqa: E402
     load_jsonl,
     write_jsonl,
 )
+from sign_type_classifier.detection_filters import (  # noqa: E402
+    filter_detections,
+    reject_instance_by_geometry,
+    reject_instance_by_size,
+)
 from sign_type_classifier import sam3_adapter as sign_sam3_adapter  # noqa: E402
 
 
@@ -123,6 +128,44 @@ def test_sign_sam3_adapter_passes_corrected_rgb_in_memory(tmp_path: Path):
     np.testing.assert_array_equal(np.asarray(resource[0]), corrected_rgb)
     assert len(detections) == 1
     assert detections[0].label == "side_plate"
+
+
+def _sign_detection(label: str, box: list[float] | None) -> SignDetection:
+    return SignDetection(
+        label=label,
+        prompt=f"{label} prompt",
+        score=0.8,
+        mask=np.ones((4, 6), dtype=bool),
+        box=None if box is None else np.asarray(box, dtype=np.float32),
+    )
+
+
+def test_sign_geometry_filters_use_normalized_xywh_rules():
+    parking_valid = _sign_detection("underground_parking_sign", [0.2, 0.20, 0.20, 0.10])
+    parking_too_low = _sign_detection("underground_parking_sign", [0.2, 0.35, 0.20, 0.10])
+    induction_valid = _sign_detection("induction_sign", [0.2, 0.20, 0.30, 0.10])
+    induction_too_wide = _sign_detection("induction_sign", [0.2, 0.20, 0.50, 0.10])
+    barrel_too_high = _sign_detection("height_restriction_barrel", [0.2, 0.20, 0.30, 0.10])
+    barrel_valid = _sign_detection("height_restriction_barrel", [0.2, 0.35, 0.30, 0.10])
+
+    assert reject_instance_by_geometry(parking_valid) is False
+    assert reject_instance_by_geometry(parking_too_low) is True
+    assert reject_instance_by_geometry(induction_valid) is False
+    assert reject_instance_by_geometry(induction_too_wide) is True
+    assert reject_instance_by_geometry(barrel_too_high) is True
+    assert reject_instance_by_geometry(barrel_valid) is False
+    assert reject_instance_by_geometry(_sign_detection("side_plate", None)) is False
+
+
+def test_sign_filters_reject_invalid_boxes_and_keep_rejection_reason():
+    missing_box = _sign_detection("induction_sign", None)
+    oversized = _sign_detection("arrestor", [0.1, 0.50, 0.50, 0.20])
+    accepted, rejected = filter_detections([missing_box, oversized])
+
+    assert accepted == []
+    assert [item.filter_name for item in rejected] == ["geometry", "size"]
+    assert rejected[0].box_metrics is None
+    assert reject_instance_by_size(oversized) is True
 
 
 def test_prompt_config_requires_all_six_sign_classes(tmp_path: Path):
