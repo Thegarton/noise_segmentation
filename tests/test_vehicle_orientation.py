@@ -30,6 +30,39 @@ from vehicle_orientation.preprocessing import (  # noqa: E402
     deduplicate_mask_indices,
     extract_mask_crop,
 )
+from vehicle_orientation import sam3_adapter as vehicle_sam3_adapter  # noqa: E402
+
+
+def test_vehicle_sam3_visual_features_are_cached_only_within_one_image():
+    class FakeBackbone:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def forward_image(self, samples):
+            self.calls += 1
+            return {"features_for": samples}
+
+    backbone = FakeBackbone()
+    predictor = SimpleNamespace(
+        model=SimpleNamespace(detector=SimpleNamespace(backbone=backbone))
+    )
+    vehicle_sam3_adapter._enable_single_image_visual_cache(predictor)
+
+    first = backbone.forward_image("frame-a")
+    cached = backbone.forward_image("frame-a-again")
+
+    assert first == {"features_for": "frame-a"}
+    assert cached is first
+    assert backbone.calls == 1
+    assert backbone._sam3_visual_cache_hits == 1
+    assert backbone._sam3_visual_cache_misses == 1
+
+    vehicle_sam3_adapter._clear_visual_feature_cache(predictor)
+    second_frame = backbone.forward_image("frame-b")
+
+    assert second_frame == {"features_for": "frame-b"}
+    assert backbone.calls == 2
+    assert backbone._sam3_visual_cache_misses == 2
 
 
 def test_extract_mask_crop_uses_padding_and_neutral_background():

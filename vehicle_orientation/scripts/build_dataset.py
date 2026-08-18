@@ -102,6 +102,7 @@ def main() -> None:
         model_dir=args.sam3_model_path,
         min_score=args.min_score,
         use_fa3=args.use_fa3,
+        cache_visual_features=args.cache_visual_features,
     )
 
     samples: list[dict[str, Any]] = []
@@ -195,6 +196,7 @@ def main() -> None:
         "prompt_groups": prompt_groups,
         "sam3_root": str(Path(args.sam3_root).expanduser().resolve()),
         "sam3_model_path": str(Path(args.sam3_model_path).expanduser().resolve()),
+        "cache_visual_features": bool(args.cache_visual_features),
         "min_score": float(args.min_score),
         "min_mask_size": int(args.min_mask_size),
         "nms_iou": float(args.nms_iou),
@@ -416,6 +418,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-images", type=int, default=None)
     parser.add_argument("--non-recursive", action="store_true")
     parser.add_argument("--use-fa3", action="store_true")
+    parser.add_argument(
+        "--cache-visual-features",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse SAM3 image-backbone features across prompts (enabled by default).",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train-ratio", type=float, default=0.70)

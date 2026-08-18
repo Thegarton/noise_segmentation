@@ -111,6 +111,7 @@ def process_image(
     vehicle_orientation_min_confidence: float = 0.70,
     vehicle_orientation_min_margin: float = 0.10,
     vehicle_orientation_nms_iou: float = 0.80,
+    save_outputs: bool = True,
 ) -> ImageResult:
     from PIL import Image  # noqa: WPS433
 
@@ -195,15 +196,16 @@ def process_image(
         confidence=confidence,
         min_mask_size=min_mask_size,
     )
-    save_image_outputs(
-        image=image,
-        image_path=image_path,
-        output_dir=output_dir,
-        instances=instances,
-        overlay_instances=list(overlay_instances),
-        semantic_mask=semantic_mask,
-        confidence=confidence,
-    )
+    if save_outputs:
+        save_image_outputs(
+            image=image,
+            image_path=image_path,
+            output_dir=output_dir,
+            instances=instances,
+            overlay_instances=list(overlay_instances),
+            semantic_mask=semantic_mask,
+            confidence=confidence,
+        )
     return ImageResult(
         image_path=image_path,
         output_dir=output_dir,
@@ -1321,6 +1323,7 @@ def sam3_single_image_folder(
     inference_precision="auto",
     cache_visual_features=False,
     frame_image_pairs=None,
+    save_outputs=True,
 ) -> FolderDetectionSummary:
 
 
@@ -1465,7 +1468,7 @@ def sam3_single_image_folder(
             if explicit_frame_id is not None
             else output_dir_for_image(out_dir, image_dir, image_path, recursive=recursive)
         )
-        if outputs_exist(
+        if save_outputs and outputs_exist(
             frame_out,
             classes_log_enabled=log_json,
         ) and not overwrite:
@@ -1511,6 +1514,7 @@ def sam3_single_image_folder(
             vehicle_orientation_min_confidence=vehicle_orientation_min_confidence,
             vehicle_orientation_min_margin=vehicle_orientation_min_margin,
             vehicle_orientation_nms_iou=vehicle_orientation_nms_iou,
+            save_outputs=save_outputs,
         )
         processing_time_seconds = time.perf_counter() - frame_started_at
         frame_classes = frozenset(result.class_pixel_counts)
@@ -1552,7 +1556,7 @@ def sam3_single_image_folder(
             },
         }
  
-        if log_json:
+        if save_outputs and log_json:
             classes_log = build_classes_log(
                 result=result,
                 prompt_config=Path(prompt_config),
@@ -1564,8 +1568,12 @@ def sam3_single_image_folder(
                 encoding="utf-8",
             )
 
-        (frame_out / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-        if validate:
+        if save_outputs:
+            (frame_out / "metadata.json").write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        if save_outputs and validate:
             validate_outputs(frame_out)
         results.append(
             {
@@ -1616,9 +1624,15 @@ def sam3_single_image_folder(
             },
         },
     }
-    manifest_path = out_dir / "sam3_single_image_folder_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"images": len(image_records), "manifest": str(manifest_path)}, indent=2))
+    if save_outputs:
+        manifest_path = out_dir / "sam3_single_image_folder_manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps({"images": len(image_records), "manifest": str(manifest_path)}, indent=2))
+    else:
+        print(json.dumps({"images": len(image_records), "save_outputs": False}, indent=2))
     return FolderDetectionSummary(
         detected_classes=frozenset(detected_classes),
         frame_ids=tuple(processed_frame_ids),

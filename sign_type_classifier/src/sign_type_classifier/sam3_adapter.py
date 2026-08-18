@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import os
 import sys
+import types
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -28,12 +29,19 @@ class Sam3SignDetector:
         model_dir: str | Path,
         min_score: float,
         use_fa3: bool = False,
+        cache_visual_features: bool = True,
     ) -> None:
         self.sam3_root = Path(sam3_root).expanduser().resolve()
         self.model_dir = Path(model_dir).expanduser().resolve()
         self.min_score = _validate_probability(min_score)
         _configure_imports(self.sam3_root, self.model_dir)
-        self.predictor = _build_predictor(self.model_dir, use_fa3=use_fa3, min_score=self.min_score)
+        self.cache_visual_features = bool(cache_visual_features)
+        self.predictor = _build_predictor(
+            self.model_dir,
+            use_fa3=use_fa3,
+            min_score=self.min_score,
+            cache_visual_features=self.cache_visual_features,
+        )
 
     def detect_labeled(
         self,
@@ -46,6 +54,7 @@ class Sam3SignDetector:
         path = Path(image_path).expanduser().resolve()
         with Image.open(path) as image:
             width, height = image.size
+        _clear_visual_feature_cache(self.predictor)
         session_id = _start_session(self.predictor, path)
         detections: list[SignDetection] = []
         try:
@@ -76,7 +85,12 @@ class Sam3SignDetector:
                         )
                     )
         finally:
-            self.predictor.handle_request(request={"type": "close_session", "session_id": session_id})
+            try:
+                self.predictor.handle_request(
+                    request={"type": "close_session", "session_id": session_id}
+                )
+            finally:
+                _clear_visual_feature_cache(self.predictor)
         return detections
 
 
@@ -92,7 +106,13 @@ def _configure_imports(sam3_root: Path, model_dir: Path) -> None:
     os.environ.setdefault("HF_HOME", str(model_dir))
 
 
-def _build_predictor(model_dir: Path, *, use_fa3: bool, min_score: float) -> Any:
+def _build_predictor(
+    model_dir: Path,
+    *,
+    use_fa3: bool,
+    min_score: float,
+    cache_visual_features: bool = True,
+) -> Any:
     import sam3.model_builder as model_builder  # type: ignore # noqa: WPS433
 
     checkpoint = model_dir / "sam3.1_multiplex.pt"
@@ -107,7 +127,52 @@ def _build_predictor(model_dir: Path, *, use_fa3: bool, min_score: float) -> Any
     parameters = inspect.signature(builder).parameters
     predictor = builder(**{key: value for key, value in kwargs.items() if key in parameters})
     _set_threshold(predictor, min_score)
+    if cache_visual_features:
+        _enable_single_image_visual_cache(predictor)
+    predictor._sam3_cache_visual_features = bool(cache_visual_features)
     return predictor
+
+
+def _resolve_visual_backbone(predictor: Any) -> Any:
+    model = getattr(predictor, "model", None)
+    detector = getattr(model, "detector", None)
+    backbone = getattr(detector, "backbone", None)
+    if backbone is None or not callable(getattr(backbone, "forward_image", None)):
+        raise AttributeError("SAM3 predictor does not expose model.detector.backbone.forward_image")
+    return backbone
+
+
+def _enable_single_image_visual_cache(predictor: Any) -> None:
+    backbone = _resolve_visual_backbone(predictor)
+    if getattr(backbone, "_sam3_visual_cache_enabled", False):
+        return
+
+    backbone._sam3_original_forward_image = backbone.forward_image
+    backbone._sam3_visual_cache_value = None
+    backbone._sam3_visual_cache_hits = 0
+    backbone._sam3_visual_cache_misses = 0
+
+    def cached_forward_image(self: Any, samples: Any, *args: Any, **kwargs: Any) -> Any:
+        cached = self._sam3_visual_cache_value
+        if cached is not None:
+            self._sam3_visual_cache_hits += 1
+            return cached
+        output = self._sam3_original_forward_image(samples, *args, **kwargs)
+        self._sam3_visual_cache_value = output
+        self._sam3_visual_cache_misses += 1
+        return output
+
+    backbone.forward_image = types.MethodType(cached_forward_image, backbone)
+    backbone._sam3_visual_cache_enabled = True
+
+
+def _clear_visual_feature_cache(predictor: Any) -> None:
+    try:
+        backbone = _resolve_visual_backbone(predictor)
+    except AttributeError:
+        return
+    if getattr(backbone, "_sam3_visual_cache_enabled", False):
+        backbone._sam3_visual_cache_value = None
 
 
 def _start_session(predictor: Any, image_path: Path) -> str:

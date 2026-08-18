@@ -22,6 +22,35 @@ from sign_type_classifier.dataset import (  # noqa: E402
     load_jsonl,
     write_jsonl,
 )
+from sign_type_classifier import sam3_adapter as sign_sam3_adapter  # noqa: E402
+
+
+def test_sign_sam3_visual_features_are_cached_only_within_one_image():
+    class FakeBackbone:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def forward_image(self, samples):
+            self.calls += 1
+            return {"features_for": samples}
+
+    backbone = FakeBackbone()
+    predictor = SimpleNamespace(
+        model=SimpleNamespace(detector=SimpleNamespace(backbone=backbone))
+    )
+    sign_sam3_adapter._enable_single_image_visual_cache(predictor)
+
+    first = backbone.forward_image("frame-a")
+    cached = backbone.forward_image("frame-a-again")
+
+    assert cached is first
+    assert backbone.calls == 1
+    assert backbone._sam3_visual_cache_hits == 1
+    assert backbone._sam3_visual_cache_misses == 1
+
+    sign_sam3_adapter._clear_visual_feature_cache(predictor)
+    assert backbone.forward_image("frame-b") == {"features_for": "frame-b"}
+    assert backbone.calls == 2
 
 
 def test_prompt_config_requires_all_six_sign_classes(tmp_path: Path):

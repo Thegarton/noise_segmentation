@@ -20,6 +20,174 @@ def test_configure_gpu_selects_one_physical_device(monkeypatch) -> None:
     assert os.environ["SAM3_PHYSICAL_GPU_ID"] == "3"
 
 
+def test_short_cli_uses_production_defaults() -> None:
+    script = load_script()
+    args = script.build_parser().parse_args(
+        [
+            "--image-path",
+            "/data/images",
+            "--img-match",
+            "/data/imgMatch.txt",
+            "--img-time-map",
+            "/data/imgTimeMap.txt",
+            "--output-path",
+            "/output/run",
+            "--gpu-num",
+            "0",
+            "--data-name",
+            "dataset",
+            "--start-frame",
+            "101",
+            "--end-frame",
+            "408",
+        ]
+    )
+
+    assert args.image_dir == "/data/images"
+    assert args.out_dir == "/output/run"
+    assert args.gpu_id == 0
+    assert Path(args.prompt_config).name == "sam3_text_prompts_pointwise_v2.yaml"
+    assert Path(args.classes_yaml).name == "classes_pointwise_v2.yaml"
+    assert Path(args.label_min_scores).name == "sam3_label_min_scores.yaml"
+    assert Path(args.vehicle_orientation_checkpoint).name == "model_best.pth"
+    assert args.min_score == 0.60
+    assert args.class_min_frames == 2
+    assert args.class_min_consecutive_frames == 2
+    assert args.min_mask_size == 500
+    assert args.overwrite is True
+    assert args.log_json is True
+    assert args.cache_visual_features is True
+    assert args.save_intermediate_outputs is False
+    assert args.vehicle_orientation_device == "cuda"
+    assert args.vehicle_orientation_min_confidence == 0.60
+    assert args.vehicle_orientation_min_margin == 0.10
+    assert args.vehicle_orientation_nms_iou == 0.80
+    assert args.vehicle_prompt_label == "vehicle"
+
+
+def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
+    script = load_script()
+    image_dir = tmp_path / "images"
+    output_dir = tmp_path / "output"
+    image_dir.mkdir()
+    output_dir.mkdir()
+    (output_dir / "old-frame").mkdir()
+    (output_dir / "old-frame" / "overlay.jpg").write_bytes(b"old")
+    for image_name in ("000010", "000011"):
+        (image_dir / f"{image_name}.jpg").write_bytes(b"image")
+
+    time_map = tmp_path / "imgTimeMap.txt"
+    time_map.write_text(
+        "000010>>1000\n"
+        "000011>>2000\n",
+        encoding="utf-8",
+    )
+    match_map = tmp_path / "imgMatch.txt"
+    match_map.write_text(
+        "000101>>000010>>0\n"
+        "000102>>000011>>0\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_sam3_single_image_folder(**kwargs):
+        captured.update(kwargs)
+        return script.FolderDetectionSummary(
+            detected_classes=frozenset({"traffic_cone"}),
+            frame_ids=("000101", "000102"),
+            frame_class_presence=(
+                frozenset({"traffic_cone"}),
+                frozenset({"traffic_cone"}),
+            ),
+        )
+
+    monkeypatch.setattr(script, "sam3_single_image_folder", fake_sam3_single_image_folder)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    script.main(
+        [
+            "--image-path",
+            str(image_dir),
+            "--img-match",
+            str(match_map),
+            "--img-time-map",
+            str(time_map),
+            "--output-path",
+            str(output_dir),
+            "--gpu-num",
+            "0",
+            "--data-name",
+            "dataset",
+            "--start-frame",
+            "101",
+            "--end-frame",
+            "102",
+        ]
+    )
+
+    assert captured["save_outputs"] is False
+    assert captured["cache_visual_features"] is True
+    assert captured["log_json"] is True
+    assert [path.name for path in output_dir.iterdir()] == ["sam3_run_summary.csv"]
+    with (output_dir / "sam3_run_summary.csv").open(encoding="utf-8", newline="") as stream:
+        row = next(csv.DictReader(stream))
+    assert row["tags"] == "锥桶(traffic_cone)"
+    assert row["start_frame"] == "000101"
+    assert row["end_frame"] == "000102"
+
+
+def test_intermediate_output_flag_is_forwarded_to_sam3(tmp_path: Path, monkeypatch) -> None:
+    script = load_script()
+    image_dir = tmp_path / "images"
+    output_dir = tmp_path / "output"
+    image_dir.mkdir()
+    (image_dir / "000010.jpg").write_bytes(b"image")
+    time_map = tmp_path / "imgTimeMap.txt"
+    time_map.write_text("000010>>1000\n", encoding="utf-8")
+    match_map = tmp_path / "imgMatch.txt"
+    match_map.write_text("000101>>000010>>0\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_sam3_single_image_folder(**kwargs):
+        captured.update(kwargs)
+        frame_dir = Path(kwargs["out_dir"]) / "000101"
+        frame_dir.mkdir(parents=True)
+        (frame_dir / "metadata.json").write_text("{}", encoding="utf-8")
+        return script.FolderDetectionSummary(
+            detected_classes=frozenset(),
+            frame_ids=("000101",),
+            frame_class_presence=(frozenset(),),
+        )
+
+    monkeypatch.setattr(script, "sam3_single_image_folder", fake_sam3_single_image_folder)
+    script.main(
+        [
+            "--image-path",
+            str(image_dir),
+            "--img-match",
+            str(match_map),
+            "--img-time-map",
+            str(time_map),
+            "--output-path",
+            str(output_dir),
+            "--gpu-num",
+            "0",
+            "--data-name",
+            "dataset",
+            "--start-frame",
+            "101",
+            "--end-frame",
+            "101",
+            "--save-intermediate-outputs",
+        ]
+    )
+
+    assert captured["save_outputs"] is True
+    assert (output_dir / "000101" / "metadata.json").is_file()
+    assert (output_dir / "sam3_run_summary.csv").is_file()
+
+
 def test_load_csv_class_tags_reads_mapping(tmp_path: Path) -> None:
     script = load_script()
     config = tmp_path / "tags.yaml"

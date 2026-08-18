@@ -18,6 +18,10 @@ conda run -p /home/a60116606/miniconda3/envs/sam3 \
 The local SAM3 checkout and local `sam3.1_multiplex.pt` are used. The builder
 does not download model weights.
 
+SAM3 visual-backbone features are computed once per image and reused for all
+prompts. This cache is enabled by default; use `--no-cache-visual-features`
+only for debugging or compatibility checks.
+
 ## Input
 
 `--source-root` is one directory of mixed images. A frame may contain many cars

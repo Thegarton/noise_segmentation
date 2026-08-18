@@ -5,8 +5,9 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 from run_sam3_single_image_folder import (
@@ -19,6 +20,19 @@ from run_sam3_single_image_folder import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_CSV_TAGS_CONFIG = REPO_ROOT / "configs" / "sam3_csv_class_tags_zh_en.yaml"
+DEFAULT_PROMPT_CONFIG = REPO_ROOT / "configs" / "sam3_text_prompts_pointwise_v2.yaml"
+DEFAULT_CLASSES_CONFIG = REPO_ROOT / "configs" / "classes_pointwise_v2.yaml"
+DEFAULT_LABEL_MIN_SCORES = REPO_ROOT / "configs" / "sam3_label_min_scores.yaml"
+DEFAULT_SAM3_ROOT = (REPO_ROOT / ".." / "sam3").resolve()
+DEFAULT_VEHICLE_ORIENTATION_ROOT = Path(
+    os.environ.get("VEHICLE_ORIENTATION_ROOT", REPO_ROOT / "vehicle_orientation")
+).expanduser().resolve()
+DEFAULT_VEHICLE_ORIENTATION_CHECKPOINT = (
+    DEFAULT_VEHICLE_ORIENTATION_ROOT
+    / "output"
+    / "vehicle_orientation_efficientnet_b2"
+    / "model_best.pth"
+)
 
 
 def load_csv_class_tags(path: str | Path) -> dict[str, str]:
@@ -85,21 +99,23 @@ def build_parser() -> argparse.ArgumentParser:
         description="Prepare HL320 images and run SAM3.1 on one selected GPU."
     )
     parser.add_argument(
-        "--image-folder-path",
-        help="Optional source image directory to preprocess before SAM3 inference.",
+        "--image-path",
+        "--image-dir",
+        dest="image_dir",
+        required=True,
+        help="Directory with prepared camera images.",
     )
     parser.add_argument(
-        "--skip-preprocessing",
-        action="store_true",
-        help="Use --image-dir as-is without camera preprocessing.",
+        "--output-path",
+        "--out-dir",
+        dest="out_dir",
+        required=True,
+        help="Output directory; only sam3_run_summary.csv is retained.",
     )
-
-    parser.add_argument("--image-dir", required=True, help="Directory with prepared camera images.")
-    parser.add_argument("--out-dir", required=True, help="Output directory for per-image SAM3 results.")
     parser.add_argument(
         "--data-name",
-        default=None,
-        help="Dataset name written to sam3_run_summary.csv. Default: data_name.",
+        required=True,
+        help="Dataset name written to sam3_run_summary.csv.",
     )
     parser.add_argument(
         "--csv-tags-yaml",
@@ -108,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--img-time-map",
-        default=None,
+        required=True,
         help=(
             "TXT with '<image-name>>><timestamp>' rows. The zero-based row index may be "
             "referenced by the second column of --img-match."
@@ -116,53 +132,60 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--img-match",
-        default=None,
+        required=True,
         help="TXT with '<frame-id>>><image-index-or-name>>><diff-ms>' rows.",
     )
     parser.add_argument(
         "--start-frame",
         type=int,
-        default=None,
+        required=True,
         help="First frame id from --img-match to process (inclusive).",
     )
     parser.add_argument(
         "--end-frame",
         type=int,
-        default=None,
+        required=True,
         help="Last frame id from --img-match to process (inclusive).",
     )
     parser.add_argument(
         "--prompt-config",
-        default=str(REPO_ROOT / "configs" / "sam3_text_prompts_pointwise_v1.yaml"),
+        default=str(DEFAULT_PROMPT_CONFIG),
     )
     parser.add_argument(
         "--classes-yaml",
-        default=str(REPO_ROOT / "configs" / "classes_pointwise_v1.yaml"),
+        default=str(DEFAULT_CLASSES_CONFIG),
     )
-    parser.add_argument("--sam3-root", default=str(REPO_ROOT / "../sam3"))
-    parser.add_argument("--sam3-model-path", default=str(REPO_ROOT / "../sam3/sam3.1"))
-    parser.add_argument("--min-score", type=float, default=0.70)
+    parser.add_argument("--sam3-root", default=str(DEFAULT_SAM3_ROOT))
+    parser.add_argument("--sam3-model-path", default=str(DEFAULT_SAM3_ROOT / "sam3.1"))
+    parser.add_argument("--min-score", type=float, default=0.60)
     parser.add_argument(
         "--label-min-score",
         "--label-min-scores",
         dest="label_min_scores",
-        default=None,
+        default=str(DEFAULT_LABEL_MIN_SCORES),
         help="Optional YAML file with per-label SAM3 score thresholds.",
     )
     parser.add_argument("--use-fa3", action="store_true")
     parser.add_argument("--prompt-log", action="store_true")
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--overwrite",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--max-images", type=int, default=None)
     parser.add_argument("--max-prompts", type=int, default=None)
     parser.add_argument("--recursive", action="store_true")
-    parser.add_argument("--log-json", action="store_true")
-    parser.add_argument("--min-mask-size", type=int, default=30)
-    parser.add_argument("--defisheye", action="store_true")
+    parser.add_argument(
+        "--log-json",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--min-mask-size", type=int, default=500)
     parser.add_argument(
         "--class-min-frames",
         type=int,
-        default=1,
+        default=2,
         help=(
             "Write a class to sam3_run_summary.csv only when it is present in at "
             "least this many processed images."
@@ -171,17 +194,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--class-min-consecutive-frames",
         type=int,
-        default=1,
+        default=2,
         help=(
             "Additionally require a class to be present in at least this many "
-            "consecutive processed images. Default 1 disables the extra restriction."
+            "consecutive processed images."
         ),
     )
 
-    parser.add_argument("--vehicle-orientation-checkpoint", default=None)
+    parser.add_argument(
+        "--vehicle-orientation-checkpoint",
+        default=str(DEFAULT_VEHICLE_ORIENTATION_CHECKPOINT),
+    )
     parser.add_argument("--vehicle-prompt-label", default="vehicle")
-    parser.add_argument("--vehicle-orientation-device", default="auto")
-    parser.add_argument("--vehicle-orientation-min-confidence", type=float, default=0.75)
+    parser.add_argument("--vehicle-orientation-device", default="cuda")
+    parser.add_argument("--vehicle-orientation-min-confidence", type=float, default=0.60)
     parser.add_argument("--vehicle-orientation-min-margin", type=float, default=0.10)
     parser.add_argument(
         "--mask-nms-iou",
@@ -193,9 +219,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sam3-only", action="store_true")
 
     parser.add_argument(
+        "--gpu-num",
         "--gpu-id",
         type=int,
-        default=None,
+        dest="gpu_id",
+        required=True,
         help=(
             "Physical GPU id for this process. Sets CUDA_VISIBLE_DEVICES before loading "
             "SAM3; inside the process the selected card is cuda:0."
@@ -209,10 +237,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cache-visual-features",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Compute the single-image visual backbone once and reuse it for all text prompts.",
     )
-    parser.add_argument("--colour-correction", action="store_true")
+    parser.add_argument(
+        "--save-intermediate-outputs",
+        action="store_true",
+        help=(
+            "Save per-frame masks, images, JSON metadata, and the SAM3 manifest. "
+            "By default only sam3_run_summary.csv is written."
+        ),
+    )
     return parser
 
 
@@ -373,31 +409,6 @@ def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame] | Non
     )
 
 
-def write_match_manifest(args: argparse.Namespace, matches: list[MatchedFrame]) -> Path:
-    output_dir = Path(args.out_dir).expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "version": 1,
-        "image_dir": str(Path(args.image_dir).expanduser().resolve()),
-        "img_time_map": str(Path(args.img_time_map).expanduser().resolve()),
-        "img_match": str(Path(args.img_match).expanduser().resolve()),
-        "start_frame": args.start_frame,
-        "end_frame": args.end_frame,
-        "frames": [
-            {
-                **asdict(match),
-                "image_path": str(match.image_path),
-            }
-            for match in matches
-        ],
-    }
-    path = output_dir / "sam3_image_match_manifest.json"
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
-    temporary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary_path.replace(path)
-    return path
-
-
 def write_run_summary_csv(
     args: argparse.Namespace,
     *,
@@ -502,31 +513,6 @@ def write_run_summary_csv(
     return summary_path
 
 
-def run_preprocessing(args: argparse.Namespace) -> None:
-    if args.skip_preprocessing:
-        return
-    if not args.image_folder_path:
-        if args.defisheye or args.colour_correction:
-            raise ValueError(
-                "--image-folder-path is required when camera preprocessing is enabled"
-            )
-        return
-    try:
-        from autolabeler.data.HL320_cameracalibration import (  # type: ignore
-            save_converted_data,
-        )
-    except ImportError as exc:
-        raise ImportError(
-            "Camera preprocessing helpers are unavailable. Use --skip-preprocessing "
-            "when --image-dir already contains prepared images."
-        ) from exc
-    save_converted_data(
-        args.image_folder_path,
-        args.defisheye,
-        args.colour_correction,
-    )
-
-
 def summarize_class_presence(
     frame_class_presence: tuple[frozenset[str], ...] | list[set[str]],
 ) -> dict[str, dict[str, int]]:
@@ -582,27 +568,41 @@ def run_sam3(
         prompt_log=args.prompt_log,
         inference_precision=args.inference_precision,
         cache_visual_features=args.cache_visual_features,
+        save_outputs=args.save_intermediate_outputs,
         frame_image_pairs=None
         if matches is None
         else [(match.frame_id, match.image_path) for match in matches],
     )
 
 
-def collect_review_images(out_dir: str | Path) -> None:
-    try:
-        from autolabeler.data.collect_image_in_one_folder import (  # type: ignore
-            collect_combine_image_in_one_folder,
-            collect_overlay_image_in_one_folder,
+def prepare_csv_only_output(
+    output_dir: str | Path,
+    *,
+    image_dir: str | Path,
+    overwrite: bool,
+) -> Path:
+    destination = Path(output_dir).expanduser().resolve()
+    source = Path(image_dir).expanduser().resolve()
+    if destination == source or destination in source.parents:
+        raise ValueError(
+            f"Output directory must not be the image directory or its parent: {destination}"
         )
-    except ImportError:
-        print(
-            "Review-image collection helpers are unavailable; per-frame outputs are complete.",
-            file=sys.stderr,
-            flush=True,
+    if destination.exists() and not destination.is_dir():
+        raise NotADirectoryError(f"Output path is not a directory: {destination}")
+
+    existing = list(destination.iterdir()) if destination.exists() else []
+    if existing and not overwrite:
+        raise FileExistsError(
+            f"Output directory is not empty: {destination}; enable --overwrite"
         )
-        return
-    collect_overlay_image_in_one_folder(out_dir)
-    collect_combine_image_in_one_folder(out_dir)
+    if overwrite:
+        for path in existing:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+    destination.mkdir(parents=True, exist_ok=True)
+    return destination
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -610,22 +610,31 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     configure_gpu(args.gpu_id)
-    run_preprocessing(args)
     matches = selected_frame_matches(args)
-    if matches is not None:
-        match_manifest = write_match_manifest(args, matches)
-        print(
-            json.dumps(
-                {
-                    "matched_frames": len(matches),
-                    "first_frame": matches[0].frame_id,
-                    "last_frame": matches[-1].frame_id,
-                    "match_manifest": str(match_manifest),
-                },
-                indent=2,
-            )
+    assert matches is not None
+    if args.save_intermediate_outputs:
+        prepare_csv_only_output(
+            args.out_dir,
+            image_dir=args.image_dir,
+            overwrite=args.overwrite,
         )
+    print(
+        json.dumps(
+            {
+                "matched_frames": len(matches),
+                "first_frame": matches[0].frame_id,
+                "last_frame": matches[-1].frame_id,
+            },
+            indent=2,
+        )
+    )
     detection_summary = run_sam3(args, matches=matches)
+    if not args.save_intermediate_outputs:
+        prepare_csv_only_output(
+            args.out_dir,
+            image_dir=args.image_dir,
+            overwrite=args.overwrite,
+        )
     summary_path = write_run_summary_csv(
         args,
         detected_classes=set(detection_summary.detected_classes),
@@ -633,7 +642,6 @@ def main(argv: list[str] | None = None) -> None:
         matches=matches,
     )
     print(json.dumps({"run_summary": str(summary_path)}, indent=2))
-    collect_review_images(args.out_dir)
 
 
 if __name__ == "__main__":

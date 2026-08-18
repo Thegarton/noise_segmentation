@@ -53,6 +53,10 @@ are treated as the same physical object when their Mask IoU is at least `0.55`
 or their containment overlap is at least `0.80`. The highest per-class SAM3
 score selects the initial review folder. There is no `unknown` folder.
 
+SAM3 visual-backbone features are computed once per image and reused for all
+sign prompts. This cache is enabled by default; use
+`--no-cache-visual-features` to disable it for debugging.
+
 The builder atomically checkpoints `manifest.jsonl` and
 `generation_state.json` after every completed source frame. Resume an
 interrupted run with the same parameters:

@@ -131,6 +131,7 @@ def main() -> None:
         model_dir=args.sam3_model_path,
         min_score=args.min_score,
         use_fa3=args.use_fa3,
+        cache_visual_features=args.cache_visual_features,
     )
     classifier = VehicleOrientationClassifier(checkpoint, device=args.device)
     crop_padding = float(classifier.crop_padding)
@@ -277,6 +278,7 @@ def main() -> None:
         "sam3_model_path": str(Path(args.sam3_model_path).expanduser().resolve()),
         "vehicle_prompts": list(prompts),
         "sam3_min_score": float(args.min_score),
+        "cache_visual_features": bool(args.cache_visual_features),
         "min_mask_size": int(args.min_mask_size),
         "nms_iou": float(args.nms_iou),
         "classifier_checkpoint": str(checkpoint),
@@ -629,6 +631,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-images", type=int, default=None)
     parser.add_argument("--non-recursive", action="store_true")
     parser.add_argument("--use-fa3", action="store_true")
+    parser.add_argument(
+        "--cache-visual-features",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse SAM3 image-backbone features across prompts (enabled by default).",
+    )
     parser.add_argument(
         "--resume",
         action="store_true",
