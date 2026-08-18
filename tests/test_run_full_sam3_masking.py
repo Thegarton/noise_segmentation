@@ -287,8 +287,6 @@ def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -
     args = argparse.Namespace(
         out_dir=str(tmp_path),
         image_dir=str(tmp_path),
-        recursive=False,
-        max_images=None,
         data_name=None,
     )
 
@@ -327,8 +325,6 @@ def test_write_run_summary_csv_filters_by_count_and_consecutive_frames(tmp_path:
     args = argparse.Namespace(
         out_dir=str(tmp_path),
         image_dir=str(tmp_path),
-        recursive=False,
-        max_images=None,
         data_name="sequence",
         class_min_frames=3,
         class_min_consecutive_frames=2,

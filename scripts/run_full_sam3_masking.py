@@ -172,10 +172,6 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
-    parser.add_argument("--validate", action="store_true")
-    parser.add_argument("--max-images", type=int, default=None)
-    parser.add_argument("--max-prompts", type=int, default=None)
-    parser.add_argument("--recursive", action="store_true")
     parser.add_argument(
         "--log-json",
         action=argparse.BooleanOptionalAction,
@@ -405,7 +401,7 @@ def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame] | Non
         img_match=args.img_match,
         start_frame=args.start_frame,
         end_frame=args.end_frame,
-        recursive=args.recursive,
+        recursive=False,
     )
 
 
@@ -424,10 +420,8 @@ def write_run_summary_csv(
     else:
         image_paths = collect_images(
             Path(args.image_dir).expanduser().resolve(),
-            recursive=args.recursive,
+            recursive=False,
         )
-        if args.max_images is not None:
-            image_paths = image_paths[: args.max_images]
         frame_ids = [image_path.stem for image_path in image_paths]
         start_timestamp = ""
         end_timestamp = ""
@@ -550,12 +544,12 @@ def run_sam3(
         sam3_model_path=args.sam3_model_path,
         min_score=args.min_score,
         label_min_scores=args.label_min_scores,
-        recursive=args.recursive,
-        max_images=args.max_images,
-        max_prompts=args.max_prompts,
+        recursive=False,
+        max_images=None,
+        max_prompts=None,
         use_fa3=args.use_fa3,
         overwrite=args.overwrite,
-        validate=args.validate,
+        validate=False,
         log_json=args.log_json,
         min_mask_size=args.min_mask_size,
         vehicle_orientation_checkpoint=args.vehicle_orientation_checkpoint,
