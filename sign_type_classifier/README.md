@@ -57,6 +57,12 @@ SAM3 visual-backbone features are computed once per image and reused for all
 sign prompts. This cache is enabled by default; use
 `--no-cache-visual-features` to disable it for debugging.
 
+For source images that have not had colour correction, add
+`--colour-correction`. The builder applies the same OpenCV `SimpleWB(P=0.5)`
+and gray-world correction as the main HL320 pipeline, then passes the corrected
+RGB frame directly to SAM3 in memory. It does not save a corrected full-frame
+image; the copied source image remains unchanged.
+
 The builder atomically checkpoints `manifest.jsonl` and
 `generation_state.json` after every completed source frame. Resume an
 interrupted run with the same parameters:

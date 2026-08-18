@@ -16,6 +16,7 @@ if str(PACKAGE_SRC) not in sys.path:
     sys.path.insert(0, str(PACKAGE_SRC))
 
 from sign_type_classifier.clustering import SignDetection, cluster_sign_detections  # noqa: E402
+from sign_type_classifier import colour_correction as sign_colour_correction  # noqa: E402
 from sign_type_classifier.dataset import (  # noqa: E402
     CLASS_NAMES,
     assign_grouped_splits,
@@ -51,6 +52,77 @@ def test_sign_sam3_visual_features_are_cached_only_within_one_image():
     sign_sam3_adapter._clear_visual_feature_cache(predictor)
     assert backbone.forward_image("frame-b") == {"features_for": "frame-b"}
     assert backbone.calls == 2
+
+
+def test_sign_colour_correction_matches_simple_wb_and_gray_world(monkeypatch: pytest.MonkeyPatch):
+    class FakeWhiteBalance:
+        percentile = None
+
+        def setP(self, value):
+            self.percentile = float(value)
+
+        def balanceWhite(self, image):
+            return image
+
+    white_balance = FakeWhiteBalance()
+    fake_cv2 = SimpleNamespace(
+        xphoto=SimpleNamespace(createSimpleWB=lambda: white_balance),
+        split=lambda image: tuple(image[..., index] for index in range(3)),
+        merge=lambda channels: np.stack(channels, axis=-1),
+    )
+    monkeypatch.setattr(sign_colour_correction, "_import_cv2", lambda: fake_cv2)
+
+    image_rgb = np.zeros((3, 4, 3), dtype=np.uint8)
+    image_rgb[..., 0] = 10
+    image_rgb[..., 1] = 20
+    image_rgb[..., 2] = 40
+    corrected = sign_colour_correction.simple_colour_correction_rgb(image_rgb)
+
+    assert white_balance.percentile == pytest.approx(0.5)
+    assert corrected.shape == image_rgb.shape
+    assert corrected.dtype == np.uint8
+    assert np.ptp(corrected.mean(axis=(0, 1))) <= 1.0
+
+
+def test_sign_sam3_adapter_passes_corrected_rgb_in_memory(tmp_path: Path):
+    pil = pytest.importorskip("PIL.Image")
+
+    class FakePredictor:
+        def __init__(self):
+            self.model = SimpleNamespace()
+            self.default_output_prob_thresh = 0.0
+            self.requests = []
+
+        def handle_request(self, *, request):
+            self.requests.append(request)
+            if request["type"] == "start_session":
+                return {"session_id": "test-session"}
+            if request["type"] == "add_prompt":
+                return {
+                    "outputs": {
+                        "masks": np.ones((1, 3, 5), dtype=bool),
+                        "scores": np.asarray([0.8], dtype=np.float32),
+                    }
+                }
+            return {}
+
+    detector = object.__new__(sign_sam3_adapter.Sam3SignDetector)
+    detector.min_score = 0.45
+    detector.predictor = FakePredictor()
+    corrected_rgb = np.full((3, 5, 3), (11, 22, 33), dtype=np.uint8)
+
+    detections = detector.detect_labeled(
+        tmp_path / "does-not-need-to-exist.jpg",
+        labeled_prompts=[("side_plate", "roadside sign")],
+        image_rgb=corrected_rgb,
+    )
+
+    resource = detector.predictor.requests[0]["resource_path"]
+    assert isinstance(resource, list) and len(resource) == 1
+    assert isinstance(resource[0], pil.Image)
+    np.testing.assert_array_equal(np.asarray(resource[0]), corrected_rgb)
+    assert len(detections) == 1
+    assert detections[0].label == "side_plate"
 
 
 def test_prompt_config_requires_all_six_sign_classes(tmp_path: Path):
@@ -209,12 +281,14 @@ def test_builder_checkpoints_and_resumes_with_fake_detector(tmp_path: Path, monk
 
     class FakeDetector:
         calls = 0
+        corrected_means = []
 
         def __init__(self, **kwargs):
             pass
 
-        def detect_labeled(self, image_path, *, labeled_prompts):
+        def detect_labeled(self, image_path, *, labeled_prompts, image_rgb=None):
             FakeDetector.calls += 1
+            FakeDetector.corrected_means.append(float(np.mean(image_rgb)))
             mask = np.zeros((8, 10), dtype=bool)
             mask[2:6, 3:8] = True
             return [
@@ -257,6 +331,7 @@ def test_builder_checkpoints_and_resumes_with_fake_detector(tmp_path: Path, monk
 
     monkeypatch.setattr(builder, "Sam3SignDetector", FakeDetector)
     monkeypatch.setattr(builder, "read_rgb", lambda path: np.zeros((8, 10, 3), dtype=np.uint8))
+    monkeypatch.setattr(builder, "simple_colour_correction_rgb", lambda image: image + 7)
     monkeypatch.setattr(builder, "copy_source_image", fake_copy)
     monkeypatch.setattr(builder, "extract_sign_crops", lambda *args, **kwargs: fake_crops)
     monkeypatch.setattr(builder, "numeric_feature_names", lambda names: ("feature",))
@@ -274,6 +349,7 @@ def test_builder_checkpoints_and_resumes_with_fake_detector(tmp_path: Path, monk
         str(tmp_path / "sam3.1"),
         "--min-mask-size",
         "1",
+        "--colour-correction",
     ]
     monkeypatch.setattr(sys, "argv", argv)
     builder.main()
@@ -282,9 +358,12 @@ def test_builder_checkpoints_and_resumes_with_fake_detector(tmp_path: Path, monk
     state = json.loads((out_dir / "generation_state.json").read_text(encoding="utf-8"))
     assert len(records) == 2
     assert FakeDetector.calls == 2
+    assert FakeDetector.corrected_means == [7.0, 7.0]
     assert state["status"] == "complete"
     assert state["completed_frames"] == 2
     assert all(record["numeric_feature_vector"] == [1.0] for record in records)
+    dataset_manifest = json.loads((out_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
+    assert dataset_manifest["colour_correction"] is True
 
     class MustNotLoadDetector:
         def __init__(self, **kwargs):

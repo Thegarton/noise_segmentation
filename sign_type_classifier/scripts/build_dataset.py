@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a manually reviewable SAM3 sign-type dataset from prepared images."""
+"""Build a manually reviewable SAM3 sign-type dataset from camera images."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from sign_type_classifier.clustering import SignCandidate, cluster_sign_detections  # noqa: E402
+from sign_type_classifier.colour_correction import simple_colour_correction_rgb  # noqa: E402
 from sign_type_classifier.dataset import (  # noqa: E402
     CLASS_NAMES,
     assign_grouped_splits,
@@ -134,9 +135,14 @@ def main() -> None:
         print(f"[{image_index:05d}/{len(source_records):05d}] {source_path}", file=sys.stderr, flush=True)
 
         image_rgb = read_rgb(source_path)
+        if args.colour_correction:
+            image_rgb = simple_colour_correction_rgb(image_rgb)
         source_copy = copy_source_image(source_path, out_dir=out_dir, source_id=source_id)
         sam3_started = time.perf_counter()
-        raw_detections = detector.detect_labeled(source_path, labeled_prompts=labeled_prompts)
+        detection_kwargs: dict[str, Any] = {"labeled_prompts": labeled_prompts}
+        if args.colour_correction:
+            detection_kwargs["image_rgb"] = image_rgb
+        raw_detections = detector.detect_labeled(source_path, **detection_kwargs)
         candidates = cluster_sign_detections(
             raw_detections,
             class_names=CLASS_NAMES,
@@ -194,6 +200,7 @@ def main() -> None:
             "source_relative_path": source["source_relative_path"],
             "source_image": str(source_copy.relative_to(out_dir)),
             "image_size": [int(image_rgb.shape[1]), int(image_rgb.shape[0])],
+            "colour_correction": bool(args.colour_correction),
             "raw_detections": len(raw_detections),
             "candidate_instances": len(candidates),
             "class_counts": dict(sorted(label_counts.items())),
@@ -240,6 +247,7 @@ def main() -> None:
         "sam3_root": str(Path(args.sam3_root).expanduser().resolve()),
         "sam3_model_path": str(Path(args.sam3_model_path).expanduser().resolve()),
         "cache_visual_features": bool(args.cache_visual_features),
+        "colour_correction": bool(args.colour_correction),
         "min_score": float(args.min_score),
         "min_mask_size": int(args.min_mask_size),
         "cluster_iou": float(args.cluster_iou),
@@ -315,6 +323,7 @@ def build_run_signature(*, source_root: Path, prompt_config: Path, args: argpars
         "crop_padding": float(args.crop_padding),
         "context_scale": float(args.context_scale),
         "sam3_model_path": str(Path(args.sam3_model_path).expanduser().resolve()),
+        "colour_correction": bool(getattr(args, "colour_correction", False)),
     }
 
 
@@ -621,9 +630,9 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run SAM3 sign prompts on prepared images and build six manually reviewable class folders."
+        description="Run SAM3 sign prompts on images and build six manually reviewable class folders."
     )
-    parser.add_argument("--source-root", required=True, help="Directory of already prepared/defisheye images.")
+    parser.add_argument("--source-root", required=True, help="Directory with source images.")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--prompt-config", default=str(DEFAULT_PROMPT_CONFIG))
     parser.add_argument("--sam3-root", required=True)
@@ -642,6 +651,16 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Reuse SAM3 image-backbone features across prompts (enabled by default).",
+    )
+    parser.add_argument(
+        "--colour-correction",
+        "--color-correction",
+        dest="colour_correction",
+        action="store_true",
+        help=(
+            "Apply OpenCV SimpleWB (P=0.5) and gray-world correction in memory "
+            "before SAM3; no corrected full-frame image is saved."
+        ),
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--overwrite", action="store_true")

@@ -48,14 +48,25 @@ class Sam3SignDetector:
         image_path: str | Path,
         *,
         labeled_prompts: Sequence[tuple[str, str]],
+        image_rgb: np.ndarray | None = None,
     ) -> list[SignDetection]:
         from PIL import Image  # noqa: WPS433
 
         path = Path(image_path).expanduser().resolve()
-        with Image.open(path) as image:
-            width, height = image.size
+        if image_rgb is None:
+            with Image.open(path) as image:
+                width, height = image.size
+            resource: Any = str(path)
+        else:
+            array = np.asarray(image_rgb)
+            if array.ndim != 3 or array.shape[2] != 3 or array.dtype != np.uint8:
+                raise ValueError(
+                    f"image_rgb must be uint8[H,W,3], got {array.shape} {array.dtype}"
+                )
+            height, width = array.shape[:2]
+            resource = [Image.fromarray(np.ascontiguousarray(array))]
         _clear_visual_feature_cache(self.predictor)
-        session_id = _start_session(self.predictor, path)
+        session_id = _start_session(self.predictor, resource)
         detections: list[SignDetection] = []
         try:
             for label, prompt in labeled_prompts:
@@ -175,8 +186,8 @@ def _clear_visual_feature_cache(predictor: Any) -> None:
         backbone._sam3_visual_cache_value = None
 
 
-def _start_session(predictor: Any, image_path: Path) -> str:
-    response = predictor.handle_request(request={"type": "start_session", "resource_path": str(image_path)})
+def _start_session(predictor: Any, resource: Any) -> str:
+    response = predictor.handle_request(request={"type": "start_session", "resource_path": resource})
     return str(response["session_id"])
 
 
