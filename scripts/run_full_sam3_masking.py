@@ -469,10 +469,6 @@ def write_run_summary_csv(
                 "start_timestamp",
                 "end_timestamp",
                 "frame_num",
-                "class_min_frames",
-                "class_min_consecutive_frames",
-                "class_frame_counts",
-                "class_max_consecutive_frames",
             ],
         )
         writer.writeheader()
@@ -485,22 +481,6 @@ def write_run_summary_csv(
                 "start_timestamp": start_timestamp,
                 "end_timestamp": end_timestamp,
                 "frame_num": len(frame_ids),
-                "class_min_frames": min_frames,
-                "class_min_consecutive_frames": min_consecutive_frames,
-                "class_frame_counts": json.dumps(
-                    {
-                        label: stats["frame_count"]
-                        for label, stats in sorted(class_stats.items())
-                    },
-                    ensure_ascii=False,
-                ),
-                "class_max_consecutive_frames": json.dumps(
-                    {
-                        label: stats["max_consecutive_frames"]
-                        for label, stats in sorted(class_stats.items())
-                    },
-                    ensure_ascii=False,
-                ),
             }
         )
     temporary_path.replace(summary_path)

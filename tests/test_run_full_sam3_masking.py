@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import csv
 import importlib.util
-import json
 import os
 import sys
 from pathlib import Path
@@ -313,11 +312,15 @@ def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -
     assert row["start_timestamp"] == "1000"
     assert row["end_timestamp"] == "2000"
     assert row["frame_num"] == "2"
-    assert json.loads(row["class_frame_counts"]) == {
-        "epoxy_floor": 1,
-        "front_of_vehicle": 2,
-        "ground_markings": 1,
-    }
+    assert list(row) == [
+        "tags",
+        "data_name",
+        "start_frame",
+        "end_frame",
+        "start_timestamp",
+        "end_timestamp",
+        "frame_num",
+    ]
 
 
 def test_write_run_summary_csv_filters_by_count_and_consecutive_frames(tmp_path: Path) -> None:
@@ -350,16 +353,6 @@ def test_write_run_summary_csv_filters_by_count_and_consecutive_frames(tmp_path:
         row = next(csv.DictReader(stream))
 
     assert row["tags"] == "consecutive"
-    assert json.loads(row["class_frame_counts"]) == {
-        "consecutive": 3,
-        "scattered": 3,
-        "too_rare": 1,
-    }
-    assert json.loads(row["class_max_consecutive_frames"]) == {
-        "consecutive": 3,
-        "scattered": 1,
-        "too_rare": 1,
-    }
 
 
 def load_script():
