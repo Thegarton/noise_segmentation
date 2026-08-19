@@ -37,25 +37,36 @@ PYTHONPATH=src python scripts/rectify_fisheye_opencv.py \
 
 Use `--auto-circle` instead of explicit center/radius only when the lens circle has a clean black border. `perspective` is the normal choice for SAM3 and other image models. `cylindrical` retains a wider horizontal view with less edge stretching, but its geometry is less similar to a conventional pinhole camera. Increasing `--output-size` improves sampling and downstream working resolution, but cannot restore detail absent from the source image.
 
-2. Run SAM3 as a camera teacher. The full wrapper prepares optional camera images,
-selects matched frames, runs the folder predictor, and collects review previews:
+2. Run SAM3 as a camera teacher. Sensor-specific prompts, classes, score
+thresholds, and CSV tags live together:
+
+```text
+configs/
+  HL320/
+    sam3_text_prompts_v2.yaml
+    classes_v2.yaml
+    sam3_label_min_scores.yaml
+    sam3_csv_class_tags_zh_en.yaml
+```
+
+Select this directory with the mandatory `--sensor-version` argument:
 
 ```bash
 PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
   python scripts/run_full_sam3_masking.py \
-  --skip-preprocessing \
-  --image-dir /path/to/prepared_images \
-  --out-dir ./output/sam3_single_image_folder \
-  --prompt-config configs/sam3_text_prompts_pointwise_v1.yaml \
-  --classes-yaml configs/classes_pointwise_v1.yaml \
-  --sam3-root /home/a60116606/git_repo/sam3 \
-  --sam3-model-path /home/a60116606/git_repo/sam3/sam3.1 \
-  --min-score 0.63 \
-  --label-min-score configs/sam3_label_min_scores.yaml \
-  --gpu-id 0 \
-  --cache-visual-features \
-  --overwrite
+  --sensor-version HL320 \
+  --image-path /path/to/Image \
+  --img-match /path/to/imgMatch.txt \
+  --img-time-map /path/to/imgTimeMap.txt \
+  --output-path ./output/sam3_run \
+  --gpu-num 0 \
+  --data-name dataset_name \
+  --start-frame 1 \
+  --end-frame 50
 ```
+
+The four paths may still be overridden individually with `--prompt-config`,
+`--classes-yaml`, `--label-min-score`, and `--csv-tags-yaml`.
 
 `--min-score` is the fallback threshold. The optional per-label table changes the internal SAM3 detection, image-only and new-detection thresholds before each prompt. Labels absent from the table retain the global value:
 
@@ -74,14 +85,15 @@ The wrapper itself intentionally owns only one GPU and does not spawn workers.
 
 ```bash
 python scripts/run_full_sam3_masking.py \
-  --skip-preprocessing \
-  --image-dir /path/to/prepared_images_part_0 \
-  --out-dir ./output/sam3_part_0 \
-  --prompt-config configs/sam3_text_prompts_pointwise_v1.yaml \
-  --classes-yaml configs/classes_pointwise_v1.yaml \
-  --gpu-id 0 \
-  --inference-precision auto \
-  --cache-visual-features
+  --sensor-version HL320 \
+  --image-path /path/to/Image \
+  --img-match /path/to/imgMatch.txt \
+  --img-time-map /path/to/imgTimeMap.txt \
+  --output-path ./output/sam3_part_0 \
+  --gpu-num 0 \
+  --data-name dataset_part_0 \
+  --start-frame 1 \
+  --end-frame 100
 ```
 
 On T4, `auto` selects FP16 because T4 has no native BF16 execution. Do not

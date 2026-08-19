@@ -19,10 +19,14 @@ from run_sam3_single_image_folder import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-DEFAULT_CSV_TAGS_CONFIG = REPO_ROOT / "configs" / "sam3_csv_class_tags_zh_en.yaml"
-DEFAULT_PROMPT_CONFIG = REPO_ROOT / "configs" / "sam3_text_prompts_pointwise_v2.yaml"
-DEFAULT_CLASSES_CONFIG = REPO_ROOT / "configs" / "classes_pointwise_v2.yaml"
-DEFAULT_LABEL_MIN_SCORES = REPO_ROOT / "configs" / "sam3_label_min_scores.yaml"
+CONFIGS_ROOT = REPO_ROOT / "configs"
+LEGACY_CSV_TAGS_CONFIG = CONFIGS_ROOT / "sam3_csv_class_tags_zh_en.yaml"
+SENSOR_CONFIG_FILENAMES = {
+    "prompt_config": "sam3_text_prompts_v2.yaml",
+    "classes_yaml": "classes_v2.yaml",
+    "label_min_scores": "sam3_label_min_scores.yaml",
+    "csv_tags_yaml": "sam3_csv_class_tags_zh_en.yaml",
+}
 DEFAULT_SAM3_ROOT = (REPO_ROOT / "../.." / "sam3").resolve()
 DEFAULT_VEHICLE_ORIENTATION_ROOT = Path(
     os.environ.get("VEHICLE_ORIENTATION_ROOT", REPO_ROOT / "vehicle_orientation")
@@ -85,6 +89,65 @@ def format_csv_tags(classes: list[str], *, class_tags: dict[str, str]) -> str:
     return "; ".join(class_tags.get(label, label) for label in classes)
 
 
+def find_sensor_config_dir(
+    sensor_version: str,
+    *,
+    configs_root: str | Path = CONFIGS_ROOT,
+) -> Path:
+    version = str(sensor_version).strip()
+    if not version:
+        raise ValueError("--sensor-version must not be empty")
+    if Path(version).name != version or "/" in version or "\\" in version:
+        raise ValueError(
+            f"--sensor-version must be a directory name, not a path: {sensor_version!r}"
+        )
+
+    root = Path(configs_root).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"Configs directory does not exist: {root}")
+    normalized = version.casefold()
+    matches = sorted(
+        path
+        for path in root.iterdir()
+        if path.is_dir() and path.name.strip().casefold() == normalized
+    )
+    if len(matches) == 1:
+        return matches[0].resolve()
+    if len(matches) > 1:
+        raise ValueError(
+            f"Sensor version {version!r} is ambiguous under {root}: "
+            f"{[path.name for path in matches]!r}"
+        )
+    available = sorted(path.name.strip() for path in root.iterdir() if path.is_dir())
+    raise FileNotFoundError(
+        f"Config directory for sensor version {version!r} was not found under {root}; "
+        f"available versions={available!r}"
+    )
+
+
+def resolve_sensor_config_paths(
+    args: argparse.Namespace,
+    *,
+    configs_root: str | Path = CONFIGS_ROOT,
+) -> argparse.Namespace:
+    sensor_dir = find_sensor_config_dir(args.sensor_version, configs_root=configs_root)
+    for attribute, filename in SENSOR_CONFIG_FILENAMES.items():
+        explicit_path = getattr(args, attribute, None)
+        config_path = (
+            Path(explicit_path).expanduser().resolve()
+            if explicit_path
+            else sensor_dir / filename
+        )
+        if not config_path.is_file():
+            source = f"explicit --{attribute.replace('_', '-')}" if explicit_path else args.sensor_version
+            raise FileNotFoundError(
+                f"Missing {attribute.replace('_', ' ')} config for {source}: {config_path}"
+            )
+        setattr(args, attribute, str(config_path))
+    args.sensor_config_dir = str(sensor_dir)
+    return args
+
+
 @dataclass(frozen=True)
 class MatchedFrame:
     frame_id: str
@@ -96,7 +159,12 @@ class MatchedFrame:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Prepare HL320 images and run SAM3.1 on one selected GPU."
+        description="Prepare sensor images and run SAM3.1 on one selected GPU."
+    )
+    parser.add_argument(
+        "--sensor-version",
+        required=True,
+        help="Sensor config directory name under configs/, for example HL320.",
     )
     parser.add_argument(
         "--image-path",
@@ -119,8 +187,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--csv-tags-yaml",
-        default=str(DEFAULT_CSV_TAGS_CONFIG),
-        help="YAML mapping English class labels to tags written to sam3_run_summary.csv.",
+        default=None,
+        help=(
+            "Optional override for the CSV tag mapping. Default: "
+            "configs/<sensor-version>/sam3_csv_class_tags_zh_en.yaml."
+        ),
     )
     parser.add_argument(
         "--img-time-map",
@@ -149,11 +220,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--prompt-config",
-        default=str(DEFAULT_PROMPT_CONFIG),
+        default=None,
+        help="Optional override; default is sam3_text_prompts_v2.yaml in the sensor config directory.",
     )
     parser.add_argument(
         "--classes-yaml",
-        default=str(DEFAULT_CLASSES_CONFIG),
+        default=None,
+        help="Optional override; default is classes_v2.yaml in the sensor config directory.",
     )
     parser.add_argument("--sam3-root", default=str(DEFAULT_SAM3_ROOT))
     parser.add_argument("--sam3-model-path", default=str(DEFAULT_SAM3_ROOT / "sam3.1"))
@@ -162,8 +235,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--label-min-score",
         "--label-min-scores",
         dest="label_min_scores",
-        default=str(DEFAULT_LABEL_MIN_SCORES),
-        help="Optional YAML file with per-label SAM3 score thresholds.",
+        default=None,
+        help=(
+            "Optional override for per-label thresholds. Default: "
+            "sam3_label_min_scores.yaml in the sensor config directory."
+        ),
     )
     parser.add_argument("--use-fa3", action="store_true")
     parser.add_argument("--prompt-log", action="store_true")
@@ -494,7 +570,7 @@ def write_run_summary_csv(
     if not data_name:
         data_name = "data_name"
     class_tags = load_csv_class_tags(
-        getattr(args, "csv_tags_yaml", DEFAULT_CSV_TAGS_CONFIG)
+        getattr(args, "csv_tags_yaml", LEGACY_CSV_TAGS_CONFIG)
     )
 
     summary_path = out_dir / "sam3_run_summary.csv"
@@ -623,6 +699,7 @@ def prepare_csv_only_output(
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    resolve_sensor_config_paths(args)
 
     configure_gpu(args.gpu_id)
     matches = selected_frame_matches(args)
@@ -643,6 +720,8 @@ def main(argv: list[str] | None = None) -> None:
                 "last_image": matches[-1].image_name,
                 "first_timestamp": matches[0].image_timestamp,
                 "last_timestamp": matches[-1].image_timestamp,
+                "sensor_version": args.sensor_version,
+                "sensor_config_dir": args.sensor_config_dir,
             },
             indent=2,
         )

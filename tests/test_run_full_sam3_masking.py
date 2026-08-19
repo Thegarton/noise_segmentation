@@ -25,6 +25,8 @@ def test_short_cli_uses_production_defaults() -> None:
         [
             "--image-path",
             "/data/images",
+            "--sensor-version",
+            "HL320",
             "--img-match",
             "/data/imgMatch.txt",
             "--img-time-map",
@@ -41,13 +43,16 @@ def test_short_cli_uses_production_defaults() -> None:
             "408",
         ]
     )
+    script.resolve_sensor_config_paths(args)
 
     assert args.image_dir == "/data/images"
     assert args.out_dir == "/output/run"
     assert args.gpu_id == 0
-    assert Path(args.prompt_config).name == "sam3_text_prompts_pointwise_v2.yaml"
-    assert Path(args.classes_yaml).name == "classes_pointwise_v2.yaml"
+    assert Path(args.prompt_config).name == "sam3_text_prompts_v2.yaml"
+    assert Path(args.classes_yaml).name == "classes_v2.yaml"
     assert Path(args.label_min_scores).name == "sam3_label_min_scores.yaml"
+    assert Path(args.csv_tags_yaml).name == "sam3_csv_class_tags_zh_en.yaml"
+    assert Path(args.sensor_config_dir).name.strip() == "HL320"
     assert Path(args.vehicle_orientation_checkpoint).name == "model_best.pth"
     assert args.min_score == 0.60
     assert args.class_min_frames == 2
@@ -62,6 +67,42 @@ def test_short_cli_uses_production_defaults() -> None:
     assert args.vehicle_orientation_min_margin == 0.10
     assert args.vehicle_orientation_nms_iou == 0.80
     assert args.vehicle_prompt_label == "vehicle"
+
+
+def test_sensor_version_is_required() -> None:
+    script = load_script()
+    sensor_action = next(
+        action for action in script.build_parser()._actions if action.dest == "sensor_version"
+    )
+
+    assert sensor_action.required is True
+
+
+def test_sensor_config_paths_are_resolved_and_explicit_override_is_kept(tmp_path: Path) -> None:
+    script = load_script()
+    configs_root = tmp_path / "configs"
+    sensor_dir = configs_root / "SENSOR_A"
+    sensor_dir.mkdir(parents=True)
+    for filename in script.SENSOR_CONFIG_FILENAMES.values():
+        (sensor_dir / filename).write_text("config\n", encoding="utf-8")
+    explicit_prompts = tmp_path / "custom_prompts.yaml"
+    explicit_prompts.write_text("prompts\n", encoding="utf-8")
+    args = argparse.Namespace(
+        sensor_version="SENSOR_A",
+        prompt_config=str(explicit_prompts),
+        classes_yaml=None,
+        label_min_scores=None,
+        csv_tags_yaml=None,
+    )
+
+    script.resolve_sensor_config_paths(args, configs_root=configs_root)
+
+    assert Path(args.prompt_config) == explicit_prompts.resolve()
+    assert Path(args.classes_yaml) == (sensor_dir / "classes_v2.yaml").resolve()
+    assert Path(args.label_min_scores) == (sensor_dir / "sam3_label_min_scores.yaml").resolve()
+    assert Path(args.csv_tags_yaml) == (
+        sensor_dir / "sam3_csv_class_tags_zh_en.yaml"
+    ).resolve()
 
 
 def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
@@ -107,6 +148,8 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
         [
             "--image-path",
             str(image_dir),
+            "--sensor-version",
+            "HL320",
             "--img-match",
             str(match_map),
             "--img-time-map",
@@ -164,6 +207,8 @@ def test_intermediate_output_flag_is_forwarded_to_sam3(tmp_path: Path, monkeypat
         [
             "--image-path",
             str(image_dir),
+            "--sensor-version",
+            "HL320",
             "--img-match",
             str(match_map),
             "--img-time-map",
