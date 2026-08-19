@@ -197,26 +197,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--img-time-map",
         required=True,
         help=(
-            "TXT with '<image-name>>><timestamp>' rows. The zero-based row index may be "
-            "referenced by the second column of --img-match."
+            "TXT with '<image-name>>><timestamp>' rows."
         ),
     )
     parser.add_argument(
         "--img-match",
         required=True,
-        help="TXT with '<frame-id>>><image-index-or-name>>><diff-ms>' rows.",
+        help=(
+            "TXT with '<image-name>>><frame-id>>><diff-ms>' rows. For each frame, "
+            "the image with the smallest absolute time difference is selected."
+        ),
     )
     parser.add_argument(
         "--start-frame",
         type=int,
         required=True,
-        help="First frame id from --img-match to process (inclusive).",
+        help="First frame id from the second --img-match column (inclusive).",
     )
     parser.add_argument(
         "--end-frame",
         type=int,
         required=True,
-        help="Last frame id from --img-match to process (inclusive).",
+        help="Last frame id from the second --img-match column (inclusive).",
     )
     parser.add_argument(
         "--prompt-config",
@@ -385,7 +387,6 @@ def load_matched_frames(
         )
 
     time_rows = parse_delimited_rows(img_time_map, columns=2)
-    time_entries: list[tuple[str, int]] = []
     time_by_name: dict[str, int] = {}
     for image_name, raw_timestamp in time_rows:
         if image_name in time_by_name:
@@ -396,39 +397,31 @@ def load_matched_frames(
             raise ValueError(
                 f"Invalid timestamp {raw_timestamp!r} for image {image_name!r} in {img_time_map}"
             ) from exc
-        time_entries.append((image_name, timestamp))
         time_by_name[image_name] = timestamp
 
     source_dir = Path(image_dir).expanduser().resolve()
     images_by_stem = index_images(source_dir, recursive=recursive)
     match_rows = parse_delimited_rows(img_match, columns=3)
-    reference_mode = resolve_image_reference_mode(
-        match_rows,
-        time_by_name=time_by_name,
-        time_entry_count=len(time_entries),
-        source=Path(img_match).expanduser().resolve(),
-    )
-    matches: list[MatchedFrame] = []
-    seen_frames: set[int] = set()
-    for frame_id, image_reference, raw_diff_ms in match_rows:
+    best_by_frame: dict[int, tuple[float, int, MatchedFrame]] = {}
+    for row_index, (image_name, frame_id, raw_diff_ms) in enumerate(match_rows):
         try:
             numeric_frame_id = int(frame_id)
         except ValueError as exc:
-            raise ValueError(f"Frame id must be numeric in {img_match}, got {frame_id!r}") from exc
+            raise ValueError(
+                f"Frame id in the second column must be numeric in {img_match}, "
+                f"got {frame_id!r}"
+            ) from exc
         if start_frame is not None and numeric_frame_id < start_frame:
             continue
         if end_frame is not None and numeric_frame_id > end_frame:
             continue
-        if numeric_frame_id in seen_frames:
-            raise ValueError(f"Duplicate frame id {frame_id!r} in {img_match}")
-        seen_frames.add(numeric_frame_id)
 
-        if reference_mode == "name":
-            image_name = image_reference
-            image_timestamp = time_by_name[image_name]
-        else:
-            image_index = int(image_reference)
-            image_name, image_timestamp = time_entries[image_index]
+        if image_name not in time_by_name:
+            raise KeyError(
+                f"Image {image_name!r} from the first column of {img_match} "
+                f"is missing from {img_time_map}"
+            )
+        image_timestamp = time_by_name[image_name]
 
         image_path = images_by_stem.get(image_name)
         if image_path is None:
@@ -441,67 +434,23 @@ def load_matched_frames(
             raise ValueError(
                 f"Invalid diff_ms {raw_diff_ms!r} for frame {frame_id} in {img_match}"
             ) from exc
-        matches.append(
-            MatchedFrame(
-                frame_id=frame_id,
-                image_path=image_path,
-                image_reference=image_reference,
-                image_name=image_name,
-                image_timestamp=image_timestamp,
-                diff_ms=diff_ms,
-            )
+        candidate = MatchedFrame(
+            frame_id=frame_id,
+            image_path=image_path,
+            image_reference=image_name,
+            image_name=image_name,
+            image_timestamp=image_timestamp,
+            diff_ms=diff_ms,
         )
+        candidate_key = (abs(diff_ms), row_index)
+        previous = best_by_frame.get(numeric_frame_id)
+        if previous is None or candidate_key < previous[:2]:
+            best_by_frame[numeric_frame_id] = (candidate_key[0], candidate_key[1], candidate)
 
-    if not matches:
+    if not best_by_frame:
         range_description = f"[{start_frame or 0}, {end_frame if end_frame is not None else 'end'}]"
         raise ValueError(f"No matched frames selected from {img_match} in range {range_description}")
-    return sorted(matches, key=lambda item: int(item.frame_id))
-
-
-def resolve_image_reference_mode(
-    match_rows: list[list[str]],
-    *,
-    time_by_name: dict[str, int],
-    time_entry_count: int,
-    source: Path,
-) -> str:
-    """Resolve the second imgMatch column once, avoiding per-row mixed modes."""
-    references = [row[1] for row in match_rows]
-    all_names = all(reference in time_by_name for reference in references)
-
-    parsed_indices: list[int] = []
-    all_indices = True
-    for reference in references:
-        try:
-            image_index = int(reference)
-        except ValueError:
-            all_indices = False
-            break
-        if image_index < 0 or image_index >= time_entry_count:
-            all_indices = False
-            break
-        parsed_indices.append(image_index)
-
-    # An exact image-name mapping wins when every reference exists by name.
-    # Otherwise all references must consistently be zero-based row indices.
-    if all_names:
-        return "name"
-    if all_indices and len(parsed_indices) == len(references):
-        return "index"
-
-    invalid = [
-        reference
-        for reference in references
-        if reference not in time_by_name
-        and not (
-            reference.lstrip("+").isdigit()
-            and 0 <= int(reference) < time_entry_count
-        )
-    ]
-    raise ValueError(
-        f"The second column of {source} cannot be resolved consistently as image "
-        f"names or zero-based imgTimeMap indices; invalid references={invalid[:5]!r}"
-    )
+    return [best_by_frame[frame_id][2] for frame_id in sorted(best_by_frame)]
 
 
 def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame] | None:

@@ -124,8 +124,8 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
     )
     match_map = tmp_path / "imgMatch.txt"
     match_map.write_text(
-        "000101>>000010>>0\n"
-        "000102>>000011>>0\n",
+        "000010>>000101>>0\n"
+        "000011>>000102>>0\n",
         encoding="utf-8",
     )
 
@@ -187,7 +187,7 @@ def test_intermediate_output_flag_is_forwarded_to_sam3(tmp_path: Path, monkeypat
     time_map = tmp_path / "imgTimeMap.txt"
     time_map.write_text("000010>>1000\n", encoding="utf-8")
     match_map = tmp_path / "imgMatch.txt"
-    match_map.write_text("000101>>000010>>0\n", encoding="utf-8")
+    match_map.write_text("000010>>000101>>0\n", encoding="utf-8")
 
     captured: dict[str, object] = {}
 
@@ -250,85 +250,49 @@ def test_load_csv_class_tags_reads_mapping(tmp_path: Path) -> None:
     }
 
 
-def test_load_matched_frames_resolves_zero_based_time_map_index(tmp_path: Path) -> None:
-    script = load_script()
-    image_dir = tmp_path / "images"
-    image_dir.mkdir()
-    time_rows = []
-    for index in range(81):
-        image_name = f"{16926 + index:06d}"
-        time_rows.append(f"{image_name}>>{1786519580000000 + index}")
-        if index >= 79:
-            (image_dir / f"{image_name}.jpg").write_bytes(b"image")
-
-    time_map = tmp_path / "imgTimeMap.txt"
-    time_map.write_text("\n".join(time_rows), encoding="utf-8")
-    match_map = tmp_path / "imgMatch.txt"
-    match_map.write_text(
-        "000125>>000079>>-2\n"
-        "000126>>000080>>7\n",
-        encoding="utf-8",
-    )
-
-    matches = script.load_matched_frames(
-        image_dir=image_dir,
-        img_time_map=time_map,
-        img_match=match_map,
-        start_frame=126,
-        end_frame=126,
-        recursive=False,
-    )
-
-    assert len(matches) == 1
-    assert matches[0].frame_id == "000126"
-    assert matches[0].image_reference == "000080"
-    assert matches[0].image_name == "017006"
-    assert matches[0].image_path == (image_dir / "017006.jpg").resolve()
-    assert matches[0].diff_ms == 7.0
-
-
-def test_load_matched_frames_accepts_image_name_from_time_map(tmp_path: Path) -> None:
-    script = load_script()
-    image_dir = tmp_path / "images"
-    image_dir.mkdir()
-    (image_dir / "017006.png").write_bytes(b"image")
-    time_map = tmp_path / "imgTimeMap.txt"
-    time_map.write_text("017006>>1786519583605000\n", encoding="utf-8")
-    match_map = tmp_path / "imgMatch.txt"
-    match_map.write_text("000126>>017006>>7\n", encoding="utf-8")
-
-    matches = script.load_matched_frames(
-        image_dir=image_dir,
-        img_time_map=time_map,
-        img_match=match_map,
-        start_frame=None,
-        end_frame=None,
-        recursive=False,
-    )
-
-    assert [(item.frame_id, item.image_name) for item in matches] == [("000126", "017006")]
-
-
-def test_load_matched_frames_uses_one_index_mode_for_numeric_image_names(tmp_path: Path) -> None:
+def test_load_matched_frames_selects_minimum_absolute_diff_for_each_frame(tmp_path: Path) -> None:
     script = load_script()
     image_dir = tmp_path / "images"
     image_dir.mkdir()
     time_map = tmp_path / "imgTimeMap.txt"
+    timestamps = {
+        "000232": 1785742610159000,
+        "000233": 1785742610200000,
+        "000234": 1785742610250000,
+        "000237": 1785742610300000,
+        "000238": 1785742610350000,
+        "000239": 1785742610400000,
+        "000240": 1785742610450000,
+        "000241": 1785742610500000,
+        "000245": 1785742610550000,
+        "000246": 1785742610600000,
+        "000247": 1785742610650000,
+        "000250": 1785742610700000,
+        "000251": 1785742610750000,
+        "000252": 1785742610800000,
+    }
     time_map.write_text(
-        "\n".join(
-            f"{index:06d}>>{1785742610000000 + index * 1000}"
-            for index in range(1, 57)
-        ),
+        "\n".join(f"{image_name}>>{timestamp}" for image_name, timestamp in timestamps.items()),
         encoding="utf-8",
     )
-    for index in range(1, 51):
-        (image_dir / f"{index:06d}.jpg").write_bytes(b"image")
+    for image_name in timestamps:
+        (image_dir / f"{image_name}.jpg").write_bytes(b"image")
     match_map = tmp_path / "imgMatch.txt"
     match_map.write_text(
-        "\n".join(
-            f"{frame:06d}>>{frame - 1:06d}>>0"
-            for frame in range(1, 51)
-        ),
+        "000232>>000001>>55\n"
+        "000233>>000001>>-44\n"
+        "000234>>000001>>-142\n"
+        "000237>>000002>>307\n"
+        "000238>>000002>>209\n"
+        "000239>>000002>>98\n"
+        "000240>>000002>>1\n"
+        "000241>>000002>>-93\n"
+        "000245>>000003>>121\n"
+        "000246>>000003>>15\n"
+        "000247>>000003>>-81\n"
+        "000250>>000004>>305\n"
+        "000251>>000004>>193\n"
+        "000252>>000004>>92\n",
         encoding="utf-8",
     )
 
@@ -337,18 +301,23 @@ def test_load_matched_frames_uses_one_index_mode_for_numeric_image_names(tmp_pat
         img_time_map=time_map,
         img_match=match_map,
         start_frame=1,
-        end_frame=50,
+        end_frame=4,
         recursive=False,
     )
 
+    assert len(matches) == 4
+    assert [item.frame_id for item in matches] == ["000001", "000002", "000003", "000004"]
     assert matches[0].frame_id == "000001"
-    assert matches[0].image_reference == "000000"
-    assert matches[0].image_name == "000001"
-    assert matches[0].image_timestamp == 1785742610001000
-    assert matches[-1].frame_id == "000050"
-    assert matches[-1].image_reference == "000049"
-    assert matches[-1].image_name == "000050"
-    assert matches[-1].image_timestamp == 1785742610050000
+    assert matches[0].image_name == "000233"
+    assert matches[0].diff_ms == -44.0
+    assert matches[0].image_timestamp == timestamps["000233"]
+    assert matches[1].image_name == "000240"
+    assert matches[1].diff_ms == 1.0
+    assert matches[2].image_name == "000246"
+    assert matches[2].diff_ms == 15.0
+    assert matches[3].image_name == "000252"
+    assert matches[3].diff_ms == 92.0
+    assert matches[3].image_timestamp == timestamps["000252"]
 
 
 def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -> None:
