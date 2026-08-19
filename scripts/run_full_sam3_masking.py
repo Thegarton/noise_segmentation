@@ -23,7 +23,7 @@ DEFAULT_CSV_TAGS_CONFIG = REPO_ROOT / "configs" / "sam3_csv_class_tags_zh_en.yam
 DEFAULT_PROMPT_CONFIG = REPO_ROOT / "configs" / "sam3_text_prompts_pointwise_v2.yaml"
 DEFAULT_CLASSES_CONFIG = REPO_ROOT / "configs" / "classes_pointwise_v2.yaml"
 DEFAULT_LABEL_MIN_SCORES = REPO_ROOT / "configs" / "sam3_label_min_scores.yaml"
-DEFAULT_SAM3_ROOT = (REPO_ROOT / ".." / "sam3").resolve()
+DEFAULT_SAM3_ROOT = (REPO_ROOT / "../.." / "sam3").resolve()
 DEFAULT_VEHICLE_ORIENTATION_ROOT = Path(
     os.environ.get("VEHICLE_ORIENTATION_ROOT", REPO_ROOT / "vehicle_orientation")
 ).expanduser().resolve()
