@@ -57,7 +57,7 @@ PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
   --sensor-version HL320 \
   --image-path /path/to/Image \
   --img-match /path/to/imgMatch.txt \
-  --img-time-map /path/to/imgTimeMap.txt \
+  --time-map /path/to/timeMap.txt \
   --output-path ./output/sam3_run \
   --gpu-num 0 \
   --data-name dataset_name \
@@ -69,12 +69,13 @@ The four paths may still be overridden individually with `--prompt-config`,
 `--classes-yaml`, `--label-min-score`, and `--csv-tags-yaml`.
 
 Each `imgMatch.txt` row has the form
-`IMAGE_NAME>>FRAME_ID>>SIGNED_TIME_DIFFERENCE`. `--start-frame` and
-`--end-frame` filter the second column. If several images reference the same
+`LIDAR_FRAME>>IMAGE_NAME>>SIGNED_TIME_DIFFERENCE`. `--start-frame` and
+`--end-frame` filter the first column. If several images reference the same
 frame, the wrapper selects the row with the smallest absolute time difference.
-`imgTimeMap.txt` has the form `FRAME_ID>>TIMESTAMP`; the first and last selected
-LiDAR frame ids are looked up there to produce `start_timestamp` and
-`end_timestamp`. Camera image ids are not used to look up timestamps.
+If several LiDAR frames select the same image, SAM3 processes that image only
+once, using the match with the smallest absolute difference. `timeMap.txt` has
+the form `LIDAR_FRAME>>LIDAR_TIMESTAMP>>...>>...`; its second column supplies
+the summary `start_timestamp` and `end_timestamp` for the full LiDAR range.
 
 `--min-score` is the fallback threshold. The optional per-label table changes the internal SAM3 detection, image-only and new-detection thresholds before each prompt. Labels absent from the table retain the global value:
 
@@ -96,7 +97,7 @@ python scripts/run_full_sam3_masking.py \
   --sensor-version HL320 \
   --image-path /path/to/Image \
   --img-match /path/to/imgMatch.txt \
-  --img-time-map /path/to/imgTimeMap.txt \
+  --time-map /path/to/timeMap.txt \
   --output-path ./output/sam3_part_0 \
   --gpu-num 0 \
   --data-name dataset_part_0 \

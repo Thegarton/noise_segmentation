@@ -194,15 +194,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--time-map",
         "--img-time-map",
+        dest="time_map",
         required=True,
-        help="TXT with '<frame-id>>><timestamp>' rows for LiDAR frames.",
+        help=(
+            "TXT with '<lidar-frame>>><lidar-timestamp>>><...>>><...>' rows. "
+            "The second column is written to the summary CSV."
+        ),
     )
     parser.add_argument(
         "--img-match",
         required=True,
         help=(
-            "TXT with '<image-name>>><frame-id>>><diff-ms>' rows. For each frame, "
+            "TXT with '<lidar-frame>>><image-name>>><diff-ms>' rows. For each frame, "
             "the image with the smallest absolute time difference is selected."
         ),
     )
@@ -210,13 +215,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--start-frame",
         type=int,
         required=True,
-        help="First frame id from the second --img-match column (inclusive).",
+        help="First LiDAR frame id from the first --img-match column (inclusive).",
     )
     parser.add_argument(
         "--end-frame",
         type=int,
         required=True,
-        help="Last frame id from the second --img-match column (inclusive).",
+        help="Last LiDAR frame id from the first --img-match column (inclusive).",
     )
     parser.add_argument(
         "--prompt-config",
@@ -333,7 +338,11 @@ def configure_gpu(gpu_id: int | None) -> None:
     os.environ["SAM3_PHYSICAL_GPU_ID"] = str(gpu_id)
 
 
-def parse_delimited_rows(path: str | Path, *, columns: int) -> list[list[str]]:
+def parse_delimited_rows(
+    path: str | Path,
+    *,
+    columns: int | tuple[int, ...],
+) -> list[list[str]]:
     source = Path(path).expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError(f"Mapping file does not exist: {source}")
@@ -342,9 +351,10 @@ def parse_delimited_rows(path: str | Path, *, columns: int) -> list[list[str]]:
     for line_number, raw_line in enumerate(source.read_text(encoding="utf-8-sig").splitlines(), start=1):
         line = raw_line.strip()
         values = [value.strip() for value in line.split(">>")]
-        if len(values) != columns or any(not value for value in values):
+        allowed_columns = (columns,) if isinstance(columns, int) else columns
+        if len(values) not in allowed_columns or any(not value for value in values):
             raise ValueError(
-                f"Expected {columns} non-empty '>>'-separated values in "
+                f"Expected {allowed_columns} non-empty '>>'-separated values in "
                 f"{source}:{line_number}, got {raw_line!r}"
             )
         rows.append(values)
@@ -369,7 +379,7 @@ def index_images(image_dir: Path, *, recursive: bool = False) -> dict[str, Path]
 def load_matched_frames(
     *,
     image_dir: str | Path,
-    img_time_map: str | Path,
+    time_map: str | Path,
     img_match: str | Path,
     start_frame: int | None,
     end_frame: int | None,
@@ -384,16 +394,17 @@ def load_matched_frames(
             f"--start-frame ({start_frame}) must not exceed --end-frame ({end_frame})"
         )
 
-    time_rows = parse_delimited_rows(img_time_map, columns=2)
+    time_rows = parse_delimited_rows(time_map, columns=(2, 4))
     time_by_frame: dict[str, int] = {}
-    for frame_id, raw_timestamp in time_rows:
+    for values in time_rows:
+        frame_id, raw_timestamp = values[:2]
         if frame_id in time_by_frame:
-            raise ValueError(f"Duplicate frame id {frame_id!r} in {img_time_map}")
+            raise ValueError(f"Duplicate frame id {frame_id!r} in {time_map}")
         try:
             timestamp = int(raw_timestamp)
         except ValueError as exc:
             raise ValueError(
-                f"Invalid timestamp {raw_timestamp!r} for frame {frame_id!r} in {img_time_map}"
+                f"Invalid timestamp {raw_timestamp!r} for frame {frame_id!r} in {time_map}"
             ) from exc
         time_by_frame[frame_id] = timestamp
 
@@ -401,12 +412,12 @@ def load_matched_frames(
     images_by_stem = index_images(source_dir, recursive=recursive)
     match_rows = parse_delimited_rows(img_match, columns=3)
     best_by_frame: dict[int, tuple[float, int, MatchedFrame]] = {}
-    for row_index, (image_name, frame_id, raw_diff_ms) in enumerate(match_rows):
+    for row_index, (frame_id, image_name, raw_diff_ms) in enumerate(match_rows):
         try:
             numeric_frame_id = int(frame_id)
         except ValueError as exc:
             raise ValueError(
-                f"Frame id in the second column must be numeric in {img_match}, "
+                f"Frame id in the first column must be numeric in {img_match}, "
                 f"got {frame_id!r}"
             ) from exc
         if start_frame is not None and numeric_frame_id < start_frame:
@@ -416,8 +427,8 @@ def load_matched_frames(
 
         if frame_id not in time_by_frame:
             raise KeyError(
-                f"Frame {frame_id!r} from the second column of {img_match} "
-                f"is missing from {img_time_map}"
+                f"Frame {frame_id!r} from the first column of {img_match} "
+                f"is missing from {time_map}"
             )
         frame_timestamp = time_by_frame[frame_id]
 
@@ -451,17 +462,35 @@ def load_matched_frames(
     return [best_by_frame[frame_id][2] for frame_id in sorted(best_by_frame)]
 
 
+def deduplicate_matches_by_image(matches: list[MatchedFrame]) -> list[MatchedFrame]:
+    """Keep one best-time match for every physical camera image."""
+    best_by_image: dict[str, tuple[float, int, MatchedFrame]] = {}
+    for index, match in enumerate(matches):
+        candidate_key = (abs(float(match.diff_ms)), index)
+        previous = best_by_image.get(match.image_name)
+        if previous is None or candidate_key < previous[:2]:
+            best_by_image[match.image_name] = (
+                candidate_key[0],
+                candidate_key[1],
+                match,
+            )
+    return sorted(
+        (entry[2] for entry in best_by_image.values()),
+        key=lambda match: int(match.frame_id),
+    )
+
+
 def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame] | None:
-    mapping_values = (args.img_time_map, args.img_match)
+    mapping_values = (args.time_map, args.img_match)
     if any(mapping_values) and not all(mapping_values):
-        raise ValueError("--img-time-map and --img-match must be provided together")
+        raise ValueError("--time-map and --img-match must be provided together")
     if not all(mapping_values):
         if args.start_frame is not None or args.end_frame is not None:
-            raise ValueError("--start-frame/--end-frame require --img-time-map and --img-match")
+            raise ValueError("--start-frame/--end-frame require --time-map and --img-match")
         return None
     return load_matched_frames(
         image_dir=args.image_dir,
-        img_time_map=args.img_time_map,
+        time_map=args.time_map,
         img_match=args.img_match,
         start_frame=args.start_frame,
         end_frame=args.end_frame,
@@ -651,6 +680,7 @@ def main(argv: list[str] | None = None) -> None:
     configure_gpu(args.gpu_id)
     matches = selected_frame_matches(args)
     assert matches is not None
+    processing_matches = deduplicate_matches_by_image(matches)
     if args.save_intermediate_outputs:
         prepare_csv_only_output(
             args.out_dir,
@@ -661,6 +691,8 @@ def main(argv: list[str] | None = None) -> None:
         json.dumps(
             {
                 "matched_frames": len(matches),
+                "unique_images": len(processing_matches),
+                "duplicate_image_matches_skipped": len(matches) - len(processing_matches),
                 "first_frame": matches[0].frame_id,
                 "last_frame": matches[-1].frame_id,
                 "first_image": matches[0].image_name,
@@ -673,7 +705,7 @@ def main(argv: list[str] | None = None) -> None:
             indent=2,
         )
     )
-    detection_summary = run_sam3(args, matches=matches)
+    detection_summary = run_sam3(args, matches=processing_matches)
     if not args.save_intermediate_outputs:
         prepare_csv_only_output(
             args.out_dir,

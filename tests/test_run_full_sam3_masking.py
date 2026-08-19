@@ -118,14 +118,14 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
 
     time_map = tmp_path / "imgTimeMap.txt"
     time_map.write_text(
-        "000101>>1000\n"
-        "000102>>2000\n",
+        "000101>>1000>>1000>>1000\n"
+        "000102>>2000>>2000>>2000\n",
         encoding="utf-8",
     )
     match_map = tmp_path / "imgMatch.txt"
     match_map.write_text(
-        "000010>>000101>>0\n"
-        "000011>>000102>>0\n",
+        "000101>>000010>>0\n"
+        "000102>>000011>>0\n",
         encoding="utf-8",
     )
 
@@ -170,6 +170,10 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
     assert captured["save_outputs"] is False
     assert captured["cache_visual_features"] is True
     assert captured["log_json"] is True
+    assert captured["frame_image_pairs"] == [
+        ("000101", (image_dir / "000010.jpg").resolve()),
+        ("000102", (image_dir / "000011.jpg").resolve()),
+    ]
     assert [path.name for path in output_dir.iterdir()] == ["sam3_run_summary.csv"]
     with (output_dir / "sam3_run_summary.csv").open(encoding="utf-8", newline="") as stream:
         row = next(csv.DictReader(stream))
@@ -185,9 +189,9 @@ def test_intermediate_output_flag_is_forwarded_to_sam3(tmp_path: Path, monkeypat
     image_dir.mkdir()
     (image_dir / "000010.jpg").write_bytes(b"image")
     time_map = tmp_path / "imgTimeMap.txt"
-    time_map.write_text("000101>>1000\n", encoding="utf-8")
+    time_map.write_text("000101>>1000>>1000>>1000\n", encoding="utf-8")
     match_map = tmp_path / "imgMatch.txt"
-    match_map.write_text("000010>>000101>>0\n", encoding="utf-8")
+    match_map.write_text("000101>>000010>>0\n", encoding="utf-8")
 
     captured: dict[str, object] = {}
 
@@ -262,7 +266,10 @@ def test_load_matched_frames_selects_minimum_absolute_diff_for_each_frame(tmp_pa
         "000004": 1785742612192000,
     }
     time_map.write_text(
-        "\n".join(f"{frame_id}>>{timestamp}" for frame_id, timestamp in timestamps.items()),
+        "\n".join(
+            f"{frame_id}>>{timestamp}>>{timestamp}>>{timestamp}"
+            for frame_id, timestamp in timestamps.items()
+        ),
         encoding="utf-8",
     )
     image_names = {
@@ -273,26 +280,26 @@ def test_load_matched_frames_selects_minimum_absolute_diff_for_each_frame(tmp_pa
         (image_dir / f"{image_name}.jpg").write_bytes(b"image")
     match_map = tmp_path / "imgMatch.txt"
     match_map.write_text(
-        "000232>>000001>>55\n"
-        "000233>>000001>>-44\n"
-        "000234>>000001>>-142\n"
-        "000237>>000002>>307\n"
-        "000238>>000002>>209\n"
-        "000239>>000002>>98\n"
-        "000240>>000002>>1\n"
-        "000241>>000002>>-93\n"
-        "000245>>000003>>121\n"
-        "000246>>000003>>15\n"
-        "000247>>000003>>-81\n"
-        "000250>>000004>>305\n"
-        "000251>>000004>>193\n"
-        "000252>>000004>>92\n",
+        "000001>>000232>>55\n"
+        "000001>>000233>>-44\n"
+        "000001>>000234>>-142\n"
+        "000002>>000237>>307\n"
+        "000002>>000238>>209\n"
+        "000002>>000239>>98\n"
+        "000002>>000240>>1\n"
+        "000002>>000241>>-93\n"
+        "000003>>000245>>121\n"
+        "000003>>000246>>15\n"
+        "000003>>000247>>-81\n"
+        "000004>>000250>>305\n"
+        "000004>>000251>>193\n"
+        "000004>>000252>>92\n",
         encoding="utf-8",
     )
 
     matches = script.load_matched_frames(
         image_dir=image_dir,
-        img_time_map=time_map,
+        time_map=time_map,
         img_match=match_map,
         start_frame=1,
         end_frame=4,
@@ -312,6 +319,25 @@ def test_load_matched_frames_selects_minimum_absolute_diff_for_each_frame(tmp_pa
     assert matches[3].image_name == "000252"
     assert matches[3].diff_ms == 92.0
     assert matches[3].frame_timestamp == timestamps["000004"]
+
+
+def test_duplicate_camera_images_are_processed_once() -> None:
+    script = load_script()
+    shared_image = Path("/images/000001.jpg")
+    unique_image = Path("/images/000002.jpg")
+    matches = [
+        script.MatchedFrame("000001", shared_image, "000001", "000001", 1000, 7444.0),
+        script.MatchedFrame("000002", shared_image, "000001", "000001", 2000, 55.0),
+        script.MatchedFrame("000003", shared_image, "000001", "000001", 3000, -44.0),
+        script.MatchedFrame("000004", unique_image, "000002", "000002", 4000, 20.0),
+    ]
+
+    processing_matches = script.deduplicate_matches_by_image(matches)
+
+    assert [(item.frame_id, item.image_name) for item in processing_matches] == [
+        ("000003", "000001"),
+        ("000004", "000002"),
+    ]
 
 
 def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -> None:
