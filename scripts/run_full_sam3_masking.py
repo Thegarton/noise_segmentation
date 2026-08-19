@@ -154,7 +154,7 @@ class MatchedFrame:
     image_path: Path
     image_reference: str
     image_name: str
-    image_timestamp: int
+    frame_timestamp: int
     diff_ms: float
 
 def build_parser() -> argparse.ArgumentParser:
@@ -196,9 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--img-time-map",
         required=True,
-        help=(
-            "TXT with '<image-name>>><timestamp>' rows."
-        ),
+        help="TXT with '<frame-id>>><timestamp>' rows for LiDAR frames.",
     )
     parser.add_argument(
         "--img-match",
@@ -387,17 +385,17 @@ def load_matched_frames(
         )
 
     time_rows = parse_delimited_rows(img_time_map, columns=2)
-    time_by_name: dict[str, int] = {}
-    for image_name, raw_timestamp in time_rows:
-        if image_name in time_by_name:
-            raise ValueError(f"Duplicate image name {image_name!r} in {img_time_map}")
+    time_by_frame: dict[str, int] = {}
+    for frame_id, raw_timestamp in time_rows:
+        if frame_id in time_by_frame:
+            raise ValueError(f"Duplicate frame id {frame_id!r} in {img_time_map}")
         try:
             timestamp = int(raw_timestamp)
         except ValueError as exc:
             raise ValueError(
-                f"Invalid timestamp {raw_timestamp!r} for image {image_name!r} in {img_time_map}"
+                f"Invalid timestamp {raw_timestamp!r} for frame {frame_id!r} in {img_time_map}"
             ) from exc
-        time_by_name[image_name] = timestamp
+        time_by_frame[frame_id] = timestamp
 
     source_dir = Path(image_dir).expanduser().resolve()
     images_by_stem = index_images(source_dir, recursive=recursive)
@@ -416,12 +414,12 @@ def load_matched_frames(
         if end_frame is not None and numeric_frame_id > end_frame:
             continue
 
-        if image_name not in time_by_name:
+        if frame_id not in time_by_frame:
             raise KeyError(
-                f"Image {image_name!r} from the first column of {img_match} "
+                f"Frame {frame_id!r} from the second column of {img_match} "
                 f"is missing from {img_time_map}"
             )
-        image_timestamp = time_by_name[image_name]
+        frame_timestamp = time_by_frame[frame_id]
 
         image_path = images_by_stem.get(image_name)
         if image_path is None:
@@ -439,7 +437,7 @@ def load_matched_frames(
             image_path=image_path,
             image_reference=image_name,
             image_name=image_name,
-            image_timestamp=image_timestamp,
+            frame_timestamp=frame_timestamp,
             diff_ms=diff_ms,
         )
         candidate_key = (abs(diff_ms), row_index)
@@ -481,8 +479,8 @@ def write_run_summary_csv(
     out_dir = Path(args.out_dir).expanduser().resolve()
     if matches is not None:
         frame_ids = [match.frame_id for match in matches]
-        start_timestamp: int | str = matches[0].image_timestamp
-        end_timestamp: int | str = matches[-1].image_timestamp
+        start_timestamp: int | str = matches[0].frame_timestamp
+        end_timestamp: int | str = matches[-1].frame_timestamp
     else:
         image_paths = collect_images(
             Path(args.image_dir).expanduser().resolve(),
@@ -667,8 +665,8 @@ def main(argv: list[str] | None = None) -> None:
                 "last_frame": matches[-1].frame_id,
                 "first_image": matches[0].image_name,
                 "last_image": matches[-1].image_name,
-                "first_timestamp": matches[0].image_timestamp,
-                "last_timestamp": matches[-1].image_timestamp,
+                "first_timestamp": matches[0].frame_timestamp,
+                "last_timestamp": matches[-1].frame_timestamp,
                 "sensor_version": args.sensor_version,
                 "sensor_config_dir": args.sensor_config_dir,
             },

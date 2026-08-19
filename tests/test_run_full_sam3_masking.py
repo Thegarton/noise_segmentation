@@ -118,8 +118,8 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
 
     time_map = tmp_path / "imgTimeMap.txt"
     time_map.write_text(
-        "000010>>1000\n"
-        "000011>>2000\n",
+        "000101>>1000\n"
+        "000102>>2000\n",
         encoding="utf-8",
     )
     match_map = tmp_path / "imgMatch.txt"
@@ -185,7 +185,7 @@ def test_intermediate_output_flag_is_forwarded_to_sam3(tmp_path: Path, monkeypat
     image_dir.mkdir()
     (image_dir / "000010.jpg").write_bytes(b"image")
     time_map = tmp_path / "imgTimeMap.txt"
-    time_map.write_text("000010>>1000\n", encoding="utf-8")
+    time_map.write_text("000101>>1000\n", encoding="utf-8")
     match_map = tmp_path / "imgMatch.txt"
     match_map.write_text("000010>>000101>>0\n", encoding="utf-8")
 
@@ -256,26 +256,20 @@ def test_load_matched_frames_selects_minimum_absolute_diff_for_each_frame(tmp_pa
     image_dir.mkdir()
     time_map = tmp_path / "imgTimeMap.txt"
     timestamps = {
-        "000232": 1785742610159000,
-        "000233": 1785742610200000,
-        "000234": 1785742610250000,
-        "000237": 1785742610300000,
-        "000238": 1785742610350000,
-        "000239": 1785742610400000,
-        "000240": 1785742610450000,
-        "000241": 1785742610500000,
-        "000245": 1785742610550000,
-        "000246": 1785742610600000,
-        "000247": 1785742610650000,
-        "000250": 1785742610700000,
-        "000251": 1785742610750000,
-        "000252": 1785742610800000,
+        "000001": 1785742610159000,
+        "000002": 1785742610906000,
+        "000003": 1785742611520000,
+        "000004": 1785742612192000,
     }
     time_map.write_text(
-        "\n".join(f"{image_name}>>{timestamp}" for image_name, timestamp in timestamps.items()),
+        "\n".join(f"{frame_id}>>{timestamp}" for frame_id, timestamp in timestamps.items()),
         encoding="utf-8",
     )
-    for image_name in timestamps:
+    image_names = {
+        "000232", "000233", "000234", "000237", "000238", "000239", "000240",
+        "000241", "000245", "000246", "000247", "000250", "000251", "000252",
+    }
+    for image_name in image_names:
         (image_dir / f"{image_name}.jpg").write_bytes(b"image")
     match_map = tmp_path / "imgMatch.txt"
     match_map.write_text(
@@ -310,14 +304,14 @@ def test_load_matched_frames_selects_minimum_absolute_diff_for_each_frame(tmp_pa
     assert matches[0].frame_id == "000001"
     assert matches[0].image_name == "000233"
     assert matches[0].diff_ms == -44.0
-    assert matches[0].image_timestamp == timestamps["000233"]
+    assert matches[0].frame_timestamp == timestamps["000001"]
     assert matches[1].image_name == "000240"
     assert matches[1].diff_ms == 1.0
     assert matches[2].image_name == "000246"
     assert matches[2].diff_ms == 15.0
     assert matches[3].image_name == "000252"
     assert matches[3].diff_ms == 92.0
-    assert matches[3].image_timestamp == timestamps["000252"]
+    assert matches[3].frame_timestamp == timestamps["000004"]
 
 
 def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -> None:
@@ -335,7 +329,7 @@ def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -
                 image_path=Path(f"/{index:06d}.jpg"),
                 image_reference=f"{index:06d}",
                 image_name=f"{index:06d}",
-                image_timestamp=timestamp,
+                frame_timestamp=timestamp,
                 diff_ms=0.0,
             )
         )

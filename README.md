@@ -72,8 +72,9 @@ Each `imgMatch.txt` row has the form
 `IMAGE_NAME>>FRAME_ID>>SIGNED_TIME_DIFFERENCE`. `--start-frame` and
 `--end-frame` filter the second column. If several images reference the same
 frame, the wrapper selects the row with the smallest absolute time difference.
-The selected first and last image names are then resolved through
-`imgTimeMap.txt` to produce `start_timestamp` and `end_timestamp`.
+`imgTimeMap.txt` has the form `FRAME_ID>>TIMESTAMP`; the first and last selected
+LiDAR frame ids are looked up there to produce `start_timestamp` and
+`end_timestamp`. Camera image ids are not used to look up timestamps.
 
 `--min-score` is the fallback threshold. The optional per-label table changes the internal SAM3 detection, image-only and new-detection thresholds before each prompt. Labels absent from the table retain the global value:
 
