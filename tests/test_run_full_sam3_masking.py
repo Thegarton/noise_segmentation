@@ -264,6 +264,48 @@ def test_load_matched_frames_accepts_image_name_from_time_map(tmp_path: Path) ->
     assert [(item.frame_id, item.image_name) for item in matches] == [("000126", "017006")]
 
 
+def test_load_matched_frames_uses_one_index_mode_for_numeric_image_names(tmp_path: Path) -> None:
+    script = load_script()
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    time_map = tmp_path / "imgTimeMap.txt"
+    time_map.write_text(
+        "\n".join(
+            f"{index:06d}>>{1785742610000000 + index * 1000}"
+            for index in range(1, 57)
+        ),
+        encoding="utf-8",
+    )
+    for index in range(1, 51):
+        (image_dir / f"{index:06d}.jpg").write_bytes(b"image")
+    match_map = tmp_path / "imgMatch.txt"
+    match_map.write_text(
+        "\n".join(
+            f"{frame:06d}>>{frame - 1:06d}>>0"
+            for frame in range(1, 51)
+        ),
+        encoding="utf-8",
+    )
+
+    matches = script.load_matched_frames(
+        image_dir=image_dir,
+        img_time_map=time_map,
+        img_match=match_map,
+        start_frame=1,
+        end_frame=50,
+        recursive=False,
+    )
+
+    assert matches[0].frame_id == "000001"
+    assert matches[0].image_reference == "000000"
+    assert matches[0].image_name == "000001"
+    assert matches[0].image_timestamp == 1785742610001000
+    assert matches[-1].frame_id == "000050"
+    assert matches[-1].image_reference == "000049"
+    assert matches[-1].image_name == "000050"
+    assert matches[-1].image_timestamp == 1785742610050000
+
+
 def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -> None:
     script = load_script()
     matches = []

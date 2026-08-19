@@ -1,0 +1,9 @@
+# Per-label SAM3 detection thresholds.
+# Labels not listed here use the global --min-score value.
+# Names must exactly match labels in sam3_text_prompts_pointwise_v1.yaml.
+
+traffic_cone: 0.30
+roadblock: 0.35
+tire: 0.35
+wheel_chock: 0.35
+traffic_sign: 0.45

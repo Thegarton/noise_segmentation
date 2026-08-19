@@ -326,8 +326,14 @@ def load_matched_frames(
     source_dir = Path(image_dir).expanduser().resolve()
     images_by_stem = index_images(source_dir, recursive=recursive)
     match_rows = parse_delimited_rows(img_match, columns=3)
+    reference_mode = resolve_image_reference_mode(
+        match_rows,
+        time_by_name=time_by_name,
+        time_entry_count=len(time_entries),
+        source=Path(img_match).expanduser().resolve(),
+    )
     matches: list[MatchedFrame] = []
-    seen_frames: set[str] = set()
+    seen_frames: set[int] = set()
     for frame_id, image_reference, raw_diff_ms in match_rows:
         try:
             numeric_frame_id = int(frame_id)
@@ -337,26 +343,15 @@ def load_matched_frames(
             continue
         if end_frame is not None and numeric_frame_id > end_frame:
             continue
-        if frame_id in seen_frames:
+        if numeric_frame_id in seen_frames:
             raise ValueError(f"Duplicate frame id {frame_id!r} in {img_match}")
-        seen_frames.add(frame_id)
+        seen_frames.add(numeric_frame_id)
 
-        if image_reference in time_by_name:
+        if reference_mode == "name":
             image_name = image_reference
             image_timestamp = time_by_name[image_name]
         else:
-            try:
-                image_index = int(image_reference)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Image reference {image_reference!r} for frame {frame_id} is neither "
-                    "an image name nor a zero-based numeric index"
-                ) from exc
-            if image_index < 0 or image_index >= len(time_entries):
-                raise IndexError(
-                    f"Image index {image_index} for frame {frame_id} is outside "
-                    f"--img-time-map range [0, {len(time_entries)})"
-                )
+            image_index = int(image_reference)
             image_name, image_timestamp = time_entries[image_index]
 
         image_path = images_by_stem.get(image_name)
@@ -384,7 +379,53 @@ def load_matched_frames(
     if not matches:
         range_description = f"[{start_frame or 0}, {end_frame if end_frame is not None else 'end'}]"
         raise ValueError(f"No matched frames selected from {img_match} in range {range_description}")
-    return matches
+    return sorted(matches, key=lambda item: int(item.frame_id))
+
+
+def resolve_image_reference_mode(
+    match_rows: list[list[str]],
+    *,
+    time_by_name: dict[str, int],
+    time_entry_count: int,
+    source: Path,
+) -> str:
+    """Resolve the second imgMatch column once, avoiding per-row mixed modes."""
+    references = [row[1] for row in match_rows]
+    all_names = all(reference in time_by_name for reference in references)
+
+    parsed_indices: list[int] = []
+    all_indices = True
+    for reference in references:
+        try:
+            image_index = int(reference)
+        except ValueError:
+            all_indices = False
+            break
+        if image_index < 0 or image_index >= time_entry_count:
+            all_indices = False
+            break
+        parsed_indices.append(image_index)
+
+    # An exact image-name mapping wins when every reference exists by name.
+    # Otherwise all references must consistently be zero-based row indices.
+    if all_names:
+        return "name"
+    if all_indices and len(parsed_indices) == len(references):
+        return "index"
+
+    invalid = [
+        reference
+        for reference in references
+        if reference not in time_by_name
+        and not (
+            reference.lstrip("+").isdigit()
+            and 0 <= int(reference) < time_entry_count
+        )
+    ]
+    raise ValueError(
+        f"The second column of {source} cannot be resolved consistently as image "
+        f"names or zero-based imgTimeMap indices; invalid references={invalid[:5]!r}"
+    )
 
 
 def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame] | None:
@@ -598,6 +639,10 @@ def main(argv: list[str] | None = None) -> None:
                 "matched_frames": len(matches),
                 "first_frame": matches[0].frame_id,
                 "last_frame": matches[-1].frame_id,
+                "first_image": matches[0].image_name,
+                "last_image": matches[-1].image_name,
+                "first_timestamp": matches[0].image_timestamp,
+                "last_timestamp": matches[-1].image_timestamp,
             },
             indent=2,
         )

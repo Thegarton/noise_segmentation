@@ -1,0 +1,37 @@
+CAR:
+  - "car"
+  - "passenger car"
+TRUCK_BUS:
+  - "truck"
+  - "bus"
+PEDESTRIAN:
+  - "pedestrian"
+  - "person"
+CYCLIST:
+  - "cyclist"
+  - "bicycle rider"
+MOTORCYCLE:
+  - "motorcycle"
+  - "motorcyclist"
+traffic_sign:
+  - "traffic sign"
+  - "road sign"
+triangular_traffic_sign:
+  - "triangular traffic sign"
+traffic_cone:
+  - "traffic cone"
+roadblock:
+  - "roadblock"
+  - "road barrier"
+tire:
+  - "loose tire on the road"
+  - "detached tire lying on the ground"
+  - "road obstacle tire not attached to a vehicle"
+wheel_chock:
+  - "wheel chock"
+thin_vertical_bar:
+  - "thin vertical pole"
+thin_horizontal_bar:
+  - "thin horizontal bar"
+road_stud:
+  - "road stud"
