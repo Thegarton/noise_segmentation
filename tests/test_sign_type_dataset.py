@@ -26,6 +26,7 @@ from sign_type_classifier.dataset import (  # noqa: E402
     write_jsonl,
 )
 from sign_type_classifier.model import (  # noqa: E402
+    SignTypeDecision,
     blend_probabilities,
     compute_numeric_normalization,
     decisions_from_probabilities,
@@ -426,6 +427,140 @@ def test_builder_checkpoints_and_resumes_with_fake_detector(tmp_path: Path, monk
     assert len(load_jsonl(out_dir / "manifest.jsonl")) == 2
 
 
+def test_builder_uses_trained_classifier_to_sort_sam3_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    builder = load_build_script()
+    source_root = tmp_path / "images"
+    out_dir = tmp_path / "dataset"
+    source_root.mkdir()
+    (source_root / "000000.jpg").write_bytes(b"prepared image")
+    checkpoint = tmp_path / "model_best.pth"
+    checkpoint.write_bytes(b"fake checkpoint")
+
+    class FakeDetector:
+        def __init__(self, **kwargs):
+            pass
+
+        def detect_labeled(self, image_path, *, labeled_prompts):
+            mask = np.zeros((8, 10), dtype=bool)
+            mask[2:6, 3:8] = True
+            return [
+                SimpleNamespace(
+                    label="side_plate",
+                    prompt="roadside traffic sign",
+                    score=0.8,
+                    mask=mask,
+                    box=None,
+                )
+            ]
+
+    class FakeClassifier:
+        calls = 0
+        feature_names = ("feature",)
+
+        def __init__(self, checkpoint_path, *, device):
+            assert Path(checkpoint_path) == checkpoint
+            assert device == "cpu"
+
+        def classify(self, context_images_rgb, numeric_features):
+            FakeClassifier.calls += 1
+            assert len(context_images_rgb) == 1
+            assert numeric_features.tolist() == [[3.0]]
+            probabilities = [0.01] * len(CLASSIFIER_CLASS_NAMES)
+            probabilities[CLASSIFIER_CLASS_NAMES.index("not_a_sign")] = 0.94
+            probabilities = tuple(probabilities)
+            return [
+                SignTypeDecision(
+                    label="not_a_sign",
+                    confidence=0.94,
+                    margin=0.80,
+                    probabilities=probabilities,
+                    image_probabilities=probabilities,
+                    numeric_probabilities=probabilities,
+                )
+            ]
+
+    mask = np.zeros((8, 10), dtype=bool)
+    mask[2:6, 3:8] = True
+    fake_crops = SimpleNamespace(
+        mask_bbox_xyxy=(3, 2, 8, 6),
+        tight_bbox_xyxy=(2, 1, 9, 7),
+        context_bbox_xyxy=(0, 0, 10, 8),
+        rgb=np.zeros((6, 7, 3), dtype=np.uint8),
+        mask=mask[1:7, 2:9],
+        masked_rgb=np.zeros((6, 7, 3), dtype=np.uint8),
+        context_rgb=np.zeros((8, 10, 3), dtype=np.uint8),
+        context_mask=mask,
+    )
+
+    def fake_copy(source_path, *, out_dir, source_id):
+        target = out_dir / "images" / f"{source_id}.jpg"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"source")
+        return target
+
+    def fake_save(*, sample_dir, review_path, **kwargs):
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        review_path.parent.mkdir(parents=True, exist_ok=True)
+        paths = {
+            "rgb": sample_dir / "rgb.png",
+            "mask": sample_dir / "mask.png",
+            "masked": sample_dir / "masked_rgb.png",
+            "context": sample_dir / "context_rgb.png",
+            "context_mask": sample_dir / "context_mask.png",
+            "preview": sample_dir / "preview.jpg",
+            "review": review_path,
+        }
+        for path in paths.values():
+            path.write_bytes(b"asset")
+        return paths
+
+    monkeypatch.setattr(builder, "Sam3SignDetector", FakeDetector)
+    monkeypatch.setattr(builder, "SignTypeEnsembleClassifier", FakeClassifier)
+    monkeypatch.setattr(builder, "read_rgb", lambda path: np.zeros((8, 10, 3), dtype=np.uint8))
+    monkeypatch.setattr(builder, "copy_source_image", fake_copy)
+    monkeypatch.setattr(builder, "extract_sign_crops", lambda *args, **kwargs: fake_crops)
+    monkeypatch.setattr(builder, "numeric_feature_names", lambda names: ("feature",))
+    monkeypatch.setattr(builder, "build_numeric_features", lambda *args, **kwargs: {"feature": 3.0})
+    monkeypatch.setattr(builder, "save_sample_assets", fake_save)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_dataset.py",
+            "--source-root",
+            str(source_root),
+            "--out-dir",
+            str(out_dir),
+            "--sam3-root",
+            str(tmp_path / "sam3"),
+            "--sam3-model-path",
+            str(tmp_path / "sam3.1"),
+            "--classifier-checkpoint",
+            str(checkpoint),
+            "--classifier-device",
+            "cpu",
+            "--min-mask-size",
+            "1",
+        ],
+    )
+
+    builder.main()
+
+    records = load_jsonl(out_dir / "manifest.jsonl")
+    assert FakeClassifier.calls == 1
+    assert len(records) == 1
+    assert records[0]["label"] == "not_a_sign"
+    assert records[0]["initial_label"] == "side_plate"
+    assert records[0]["classifier_accepted"] is True
+    assert records[0]["classifier_prediction"]["predicted_label"] == "not_a_sign"
+    assert records[0]["review_image"].startswith("review/not_a_sign/")
+    manifest = json.loads((out_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["classifier"]["enabled"] is True
+
+
 def test_builder_smoke_and_resume_without_cuda(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     pytest.importorskip("cv2")
     pil = pytest.importorskip("PIL.Image")
@@ -568,6 +703,30 @@ def test_numeric_normalization_and_probability_fusion():
     )
     assert decisions[0].label == CLASSIFIER_CLASS_NAMES[0]
     assert decisions[0].confidence == pytest.approx(0.75)
+
+
+def test_classifier_assignment_falls_back_to_sam3_below_thresholds():
+    probabilities = tuple([1.0 / len(CLASSIFIER_CLASS_NAMES)] * len(CLASSIFIER_CLASS_NAMES))
+    prediction = SignTypeDecision(
+        label="overhead_traffic_sign",
+        confidence=0.45,
+        margin=0.02,
+        probabilities=probabilities,
+        image_probabilities=probabilities,
+        numeric_probabilities=probabilities,
+    )
+    builder = load_build_script()
+
+    assignment = builder.resolve_auto_label_assignment(
+        sam3_label="side_plate",
+        classifier_prediction=prediction,
+        min_confidence=0.50,
+        min_margin=0.05,
+    )
+
+    assert assignment.assigned_label == "side_plate"
+    assert assignment.classifier_accepted is False
+    assert assignment.classifier_fallback_reason == "low_confidence+low_margin"
 
 
 def test_reindex_merges_datasets_with_colliding_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

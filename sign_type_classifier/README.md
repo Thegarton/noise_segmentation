@@ -88,6 +88,54 @@ conda run -p /home/a60116606/miniconda3/envs/sam3 \
 Changing prompts, SAM3 model path, thresholds, clustering, or crop parameters
 causes resume validation to fail instead of mixing incompatible samples.
 
+## Bootstrap New Rounds With The Trained Classifier
+
+After training the numeric + EfficientNet ensemble, pass its checkpoint back
+to the dataset builder:
+
+```bash
+conda run -p /home/a60116606/miniconda3/envs/sam3 \
+  python sign_type_classifier/scripts/build_dataset.py \
+  --source-root /path/to/new_prepared_images \
+  --out-dir ./output/sign_type_dataset_round_9 \
+  --prompt-config sign_type_classifier/configs/sign_type_prompts.yaml \
+  --sam3-root /home/a60116606/git_repo/sam3 \
+  --sam3-model-path /home/a60116606/git_repo/sam3/sam3.1 \
+  --classifier-checkpoint ./output/sign_type_classifier_ensemble/model_best.pth \
+  --classifier-device cpu \
+  --classifier-min-confidence 0.50 \
+  --classifier-min-margin 0.05 \
+  --min-score 0.45 \
+  --min-mask-size 900 \
+  --overwrite
+```
+
+SAM3 still detects and segments all candidate masks. The trained classifier is
+loaded once and classifies all candidates from one frame as a batch. A
+prediction is used as the review-folder label only when both confidence and
+top-1 margin pass the configured thresholds. Otherwise the sample falls back
+to the original SAM3 top-1 folder. Set both thresholds to `0` to always accept
+the classifier top-1 prediction.
+
+The classifier defaults to `--classifier-device cpu` so SAM3 keeps the GPU
+memory. The
+EfficientNet-B0 and numeric branch are small, so CPU classification is normally
+minor compared with SAM3 prompt inference. Use `cuda` or `cuda:0` when enough
+VRAM is available.
+
+Every sample keeps the following audit trail in `metadata.json` and
+`manifest.jsonl`:
+
+- `initial_label`: original SAM3 prompt class;
+- `label`: final folder selected by the classifier or fallback;
+- `classifier_prediction`: ensemble, image, and numeric probabilities;
+- `classifier_accepted` and `classifier_fallback_reason`.
+
+High-confidence `not_a_sign` predictions are preserved in
+`review/not_a_sign`, allowing them to remain useful hard negatives after manual
+review. Resume state includes the classifier checkpoint SHA256 and thresholds,
+so a run cannot accidentally continue with different model weights.
+
 ## Output
 
 ```text

@@ -10,6 +10,7 @@ import shutil
 import sys
 import time
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -45,6 +46,7 @@ from sign_type_classifier.features import (  # noqa: E402
     extract_sign_crops,
     numeric_feature_names,
 )
+from sign_type_classifier.model import SignTypeDecision, SignTypeEnsembleClassifier  # noqa: E402
 from sign_type_classifier.sam3_adapter import Sam3SignDetector  # noqa: E402
 
 
@@ -52,7 +54,7 @@ DEFAULT_PROMPT_CONFIG = PROJECT_ROOT / "configs" / "sign_type_prompts.yaml"
 CLASS_COLORS = {
     label: tuple(int(value) for value in color)
     for label, color in zip(
-        CLASS_NAMES,
+        CLASSIFIER_CLASS_NAMES,
         (
             (235, 80, 70),
             (235, 165, 45),
@@ -60,9 +62,19 @@ CLASS_COLORS = {
             (65, 115, 220),
             (175, 90, 220),
             (60, 190, 105),
+            (125, 125, 125),
         ),
     )
 }
+
+
+@dataclass(frozen=True)
+class AutoLabelAssignment:
+    assigned_label: str
+    label_source: str
+    classifier_prediction: SignTypeDecision | None
+    classifier_accepted: bool
+    classifier_fallback_reason: str | None
 
 
 def main() -> None:
@@ -115,6 +127,7 @@ def main() -> None:
         if source_id_from_relative_path(source["source_relative_path"]) not in completed_source_ids
     ]
     detector = None
+    classifier = None
     if pending:
         detector = Sam3SignDetector(
             sam3_root=args.sam3_root,
@@ -123,8 +136,18 @@ def main() -> None:
             use_fa3=args.use_fa3,
             cache_visual_features=args.cache_visual_features,
         )
+        if args.classifier_checkpoint:
+            classifier = SignTypeEnsembleClassifier(
+                args.classifier_checkpoint,
+                device=args.classifier_device,
+            )
 
     feature_names = numeric_feature_names(CLASS_NAMES)
+    if classifier is not None and tuple(classifier.feature_names) != tuple(feature_names):
+        raise ValueError(
+            "Classifier numeric features do not match this dataset builder. "
+            f"checkpoint={classifier.feature_names}, builder={feature_names}"
+        )
     for image_index, source in enumerate(source_records, start=1):
         source_path = Path(source["source_path"])
         source_id = source_id_from_relative_path(source["source_relative_path"])
@@ -164,9 +187,8 @@ def main() -> None:
         )
         sam3_seconds = time.perf_counter() - sam3_started
 
-        frame_records = []
+        prepared_candidates = []
         for instance_index, candidate in enumerate(candidates):
-            sample_id = f"{source_id}_{instance_index:03d}"
             crops = extract_sign_crops(
                 image_rgb,
                 candidate.mask,
@@ -180,14 +202,50 @@ def main() -> None:
                 class_scores=candidate.class_scores,
                 context_scale=args.context_scale,
             )
+            prepared_candidates.append((instance_index, candidate, crops, numeric_features))
+
+        classifier_started = time.perf_counter()
+        classifier_predictions: list[SignTypeDecision] = []
+        if classifier is not None and prepared_candidates:
+            classifier_predictions = classifier.classify(
+                [item[2].context_rgb for item in prepared_candidates],
+                np.asarray(
+                    [
+                        [float(item[3][name]) for name in feature_names]
+                        for item in prepared_candidates
+                    ],
+                    dtype=np.float32,
+                ),
+            )
+            if len(classifier_predictions) != len(prepared_candidates):
+                raise RuntimeError(
+                    "Sign classifier returned an unexpected number of predictions: "
+                    f"{len(classifier_predictions)} for {len(prepared_candidates)} candidates"
+                )
+        classifier_seconds = time.perf_counter() - classifier_started
+
+        frame_records = []
+        for prepared_index, (instance_index, candidate, crops, numeric_features) in enumerate(prepared_candidates):
+            sample_id = f"{source_id}_{instance_index:03d}"
+            assignment = resolve_auto_label_assignment(
+                sam3_label=candidate.label,
+                classifier_prediction=(
+                    classifier_predictions[prepared_index]
+                    if classifier_predictions
+                    else None
+                ),
+                min_confidence=args.classifier_min_confidence,
+                min_margin=args.classifier_min_margin,
+            )
             sample_dir = out_dir / "samples" / sample_id
-            review_path = out_dir / "review" / candidate.label / f"{sample_id}.jpg"
+            review_path = out_dir / "review" / assignment.assigned_label / f"{sample_id}.jpg"
             paths = save_sample_assets(
                 sample_dir=sample_dir,
                 review_path=review_path,
                 image_rgb=image_rgb,
                 candidate=candidate,
                 crops=crops,
+                assignment=assignment,
             )
             record = build_sample_record(
                 sample_id=sample_id,
@@ -201,11 +259,12 @@ def main() -> None:
                 paths=paths,
                 numeric_features=numeric_features,
                 feature_names=feature_names,
+                assignment=assignment,
             )
             write_json_atomic(sample_dir / "metadata.json", record)
             frame_records.append(record)
 
-        label_counts = Counter(item.label for item in candidates)
+        label_counts = Counter(str(item["label"]) for item in frame_records)
         source_result = {
             "source_id": source_id,
             "source_path": str(source_path),
@@ -219,8 +278,13 @@ def main() -> None:
             "detection_rejections": [rejection_to_json(item) for item in rejected_detections],
             "candidate_instances": len(candidates),
             "class_counts": dict(sorted(label_counts.items())),
+            "classifier_enabled": classifier is not None,
+            "classifier_accepted": sum(
+                int(bool(item.get("classifier_accepted"))) for item in frame_records
+            ),
             "timing_seconds": {
                 "sam3": round(sam3_seconds, 6),
+                "classifier": round(classifier_seconds, 6),
                 "total": round(time.perf_counter() - frame_started, 6),
             },
         }
@@ -242,7 +306,7 @@ def main() -> None:
 
     samples = assign_grouped_splits(
         samples,
-        class_names=CLASS_NAMES,
+        class_names=CLASSIFIER_CLASS_NAMES,
         seed=args.seed,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
@@ -255,7 +319,8 @@ def main() -> None:
         "mode": "sam3_sign_type_autosort",
         "source_root": str(source_root),
         "out_dir": str(out_dir),
-        "class_names": list(CLASS_NAMES),
+        "class_names": list(CLASSIFIER_CLASS_NAMES),
+        "detection_class_names": list(CLASS_NAMES),
         "prompt_config": str(prompt_config),
         "prompts": prompts_by_label,
         "run_signature": run_signature,
@@ -272,6 +337,7 @@ def main() -> None:
         "cluster_containment": float(args.cluster_containment),
         "crop_padding": float(args.crop_padding),
         "context_scale": float(args.context_scale),
+        "classifier": classifier_manifest(args),
         "numeric_feature_names": list(feature_names),
         "split": split_metadata(seed=args.seed, train_ratio=args.train_ratio, val_ratio=args.val_ratio),
         "manual_review": {
@@ -332,7 +398,7 @@ def load_prompt_config(path: str | Path) -> dict[str, list[str]]:
 
 
 def build_run_signature(*, source_root: Path, prompt_config: Path, args: argparse.Namespace) -> dict[str, Any]:
-    return {
+    signature = {
         "source_root": str(source_root),
         "prompt_sha256": hashlib.sha256(prompt_config.read_bytes()).hexdigest(),
         "class_names": list(CLASS_NAMES),
@@ -346,6 +412,89 @@ def build_run_signature(*, source_root: Path, prompt_config: Path, args: argpars
         "sam3_model_path": str(Path(args.sam3_model_path).expanduser().resolve()),
         "colour_correction": bool(getattr(args, "colour_correction", False)),
         "geometry_filters": bool(getattr(args, "geometry_filters", True)),
+    }
+    if getattr(args, "classifier_checkpoint", None):
+        checkpoint = Path(args.classifier_checkpoint).expanduser().resolve()
+        signature["classifier"] = {
+            "checkpoint": str(checkpoint),
+            "checkpoint_sha256": file_sha256(checkpoint),
+            "device": str(args.classifier_device),
+            "min_confidence": float(args.classifier_min_confidence),
+            "min_margin": float(args.classifier_min_margin),
+        }
+    return signature
+
+
+def resolve_auto_label_assignment(
+    *,
+    sam3_label: str,
+    classifier_prediction: SignTypeDecision | None,
+    min_confidence: float,
+    min_margin: float,
+) -> AutoLabelAssignment:
+    if sam3_label not in CLASS_NAMES:
+        raise ValueError(f"Unknown SAM3 sign label: {sam3_label!r}")
+    if classifier_prediction is None:
+        return AutoLabelAssignment(
+            assigned_label=sam3_label,
+            label_source="sam3_prompt_top1",
+            classifier_prediction=None,
+            classifier_accepted=False,
+            classifier_fallback_reason=None,
+        )
+    if classifier_prediction.label not in CLASSIFIER_CLASS_NAMES:
+        raise ValueError(
+            f"Classifier returned unknown label {classifier_prediction.label!r}; "
+            f"expected one of {CLASSIFIER_CLASS_NAMES}"
+        )
+    reasons = []
+    if classifier_prediction.confidence < float(min_confidence):
+        reasons.append("low_confidence")
+    if classifier_prediction.margin < float(min_margin):
+        reasons.append("low_margin")
+    accepted = not reasons
+    return AutoLabelAssignment(
+        assigned_label=classifier_prediction.label if accepted else sam3_label,
+        label_source=(
+            "sign_type_ensemble"
+            if accepted
+            else "sam3_prompt_top1_classifier_fallback"
+        ),
+        classifier_prediction=classifier_prediction,
+        classifier_accepted=accepted,
+        classifier_fallback_reason="+".join(reasons) if reasons else None,
+    )
+
+
+def classifier_prediction_to_json(assignment: AutoLabelAssignment) -> dict[str, Any] | None:
+    prediction = assignment.classifier_prediction
+    if prediction is None:
+        return None
+    return {
+        "predicted_label": prediction.label,
+        "assigned_label": assignment.assigned_label,
+        "accepted": bool(assignment.classifier_accepted),
+        "fallback_reason": assignment.classifier_fallback_reason,
+        "confidence": float(prediction.confidence),
+        "margin": float(prediction.margin),
+        "probabilities": dict(zip(CLASSIFIER_CLASS_NAMES, prediction.probabilities)),
+        "image_probabilities": dict(zip(CLASSIFIER_CLASS_NAMES, prediction.image_probabilities)),
+        "numeric_probabilities": dict(zip(CLASSIFIER_CLASS_NAMES, prediction.numeric_probabilities)),
+    }
+
+
+def classifier_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.classifier_checkpoint:
+        return {"enabled": False}
+    checkpoint = Path(args.classifier_checkpoint).expanduser().resolve()
+    return {
+        "enabled": True,
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": file_sha256(checkpoint),
+        "device": str(args.classifier_device),
+        "min_confidence": float(args.classifier_min_confidence),
+        "min_margin": float(args.classifier_min_margin),
+        "fallback": "sam3_prompt_top1",
     }
 
 
@@ -362,14 +511,15 @@ def build_sample_record(
     paths: dict[str, Path],
     numeric_features: dict[str, float],
     feature_names: Sequence[str],
+    assignment: AutoLabelAssignment,
 ) -> dict[str, Any]:
     canonical = candidate.canonical_detection
     return {
         "sample_id": sample_id,
         "source_id": source_id,
-        "label": candidate.label,
+        "label": assignment.assigned_label,
         "initial_label": candidate.label,
-        "label_source": "sam3_prompt_top1",
+        "label_source": assignment.label_source,
         "source_path": str(source_path),
         "source_relative_path": source_relative_path,
         "source_image": str(source_copy.relative_to(out_dir)),
@@ -393,6 +543,9 @@ def build_sample_record(
         "mask_pixels": int(np.count_nonzero(candidate.mask)),
         "numeric_features": {name: float(numeric_features[name]) for name in feature_names},
         "numeric_feature_vector": [float(numeric_features[name]) for name in feature_names],
+        "classifier_accepted": bool(assignment.classifier_accepted),
+        "classifier_fallback_reason": assignment.classifier_fallback_reason,
+        "classifier_prediction": classifier_prediction_to_json(assignment),
     }
 
 
@@ -413,6 +566,7 @@ def save_sample_assets(
     image_rgb: np.ndarray,
     candidate: SignCandidate,
     crops: SignCrops,
+    assignment: AutoLabelAssignment,
 ) -> dict[str, Path]:
     from PIL import Image  # noqa: WPS433
 
@@ -432,16 +586,27 @@ def save_sample_assets(
     Image.fromarray(crops.masked_rgb, mode="RGB").save(paths["masked"])
     Image.fromarray(crops.context_rgb, mode="RGB").save(paths["context"])
     Image.fromarray(crops.context_mask.astype(np.uint8) * 255, mode="L").save(paths["context_mask"])
-    preview = make_review_preview(image_rgb=image_rgb, candidate=candidate, crops=crops)
+    preview = make_review_preview(
+        image_rgb=image_rgb,
+        candidate=candidate,
+        crops=crops,
+        assignment=assignment,
+    )
     preview.save(paths["preview"], quality=95)
     preview.save(paths["review"], quality=95)
     return paths
 
 
-def make_review_preview(*, image_rgb: np.ndarray, candidate: SignCandidate, crops: SignCrops) -> Any:
+def make_review_preview(
+    *,
+    image_rgb: np.ndarray,
+    candidate: SignCandidate,
+    crops: SignCrops,
+    assignment: AutoLabelAssignment,
+) -> Any:
     from PIL import Image, ImageDraw, ImageOps  # noqa: WPS433
 
-    color = CLASS_COLORS[candidate.label]
+    color = CLASS_COLORS[assignment.assigned_label]
     full = Image.fromarray(image_rgb, mode="RGB")
     full_draw = ImageDraw.Draw(full)
     full_draw.rectangle(crops.mask_bbox_xyxy, outline=color, width=max(2, full.width // 800))
@@ -462,7 +627,16 @@ def make_review_preview(*, image_rgb: np.ndarray, candidate: SignCandidate, crop
         canvas.paste(panel, (x, 60))
         x += panel.width
     draw = ImageDraw.Draw(canvas)
-    title = f"{candidate.label}  score={candidate.score:.3f}  margin={candidate.margin:.3f}"
+    prediction = assignment.classifier_prediction
+    if prediction is None:
+        title = f"{candidate.label}  SAM3 score={candidate.score:.3f} margin={candidate.margin:.3f}"
+    else:
+        status = "accepted" if assignment.classifier_accepted else f"fallback:{assignment.classifier_fallback_reason}"
+        title = (
+            f"{assignment.assigned_label}  classifier={prediction.label} "
+            f"conf={prediction.confidence:.3f} margin={prediction.margin:.3f}  "
+            f"SAM3={candidate.label}  {status}"
+        )
     draw.rectangle((0, 0, canvas.width, 60), fill=(18, 18, 18))
     draw.text((16, 18), title, fill=color)
     return canvas
@@ -507,7 +681,7 @@ def checkpoint_progress(
 ) -> None:
     records = assign_grouped_splits(
         samples,
-        class_names=CLASS_NAMES,
+        class_names=CLASSIFIER_CLASS_NAMES,
         seed=seed,
         train_ratio=train_ratio,
         val_ratio=val_ratio,
@@ -612,11 +786,21 @@ def _remove_stale_source_outputs(out_dir: Path, *, source_id: str) -> None:
         for path in samples_dir.glob(f"{source_id}_*"):
             if path.is_dir():
                 shutil.rmtree(path)
-    for label in CLASS_NAMES:
+    for label in CLASSIFIER_CLASS_NAMES:
         review_dir = out_dir / "review" / label
         if review_dir.is_dir():
             for path in review_dir.glob(f"{source_id}_*.jpg"):
                 path.unlink()
+
+
+def file_sha256(path: Path) -> str:
+    if not path.is_file():
+        raise FileNotFoundError(f"Classifier checkpoint does not exist: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _prepare_output_dir(out_dir: Path, *, source_root: Path, overwrite: bool, resume: bool) -> None:
@@ -640,7 +824,13 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError(f"--max-images must be positive, got {args.max_images}")
     if args.min_mask_size <= 0:
         raise ValueError(f"--min-mask-size must be positive, got {args.min_mask_size}")
-    for name in ("min_score", "cluster_iou", "cluster_containment"):
+    for name in (
+        "min_score",
+        "cluster_iou",
+        "cluster_containment",
+        "classifier_min_confidence",
+        "classifier_min_margin",
+    ):
         value = float(getattr(args, name))
         if not 0.0 <= value <= 1.0:
             raise ValueError(f"--{name.replace('_', '-')} must be in [0,1], got {value}")
@@ -689,6 +879,33 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Filter detections with label-specific normalized XYWH geometry rules.",
+    )
+    parser.add_argument(
+        "--classifier-checkpoint",
+        "--sign-classifier-checkpoint",
+        dest="classifier_checkpoint",
+        default=None,
+        help=(
+            "Optional model_best.pth from sign_type_classifier/scripts/train.py. "
+            "SAM3 finds masks; the ensemble then chooses their review folders."
+        ),
+    )
+    parser.add_argument(
+        "--classifier-device",
+        default="cpu",
+        help="Device for the sign classifier, for example auto, cuda, cuda:0, or cpu.",
+    )
+    parser.add_argument(
+        "--classifier-min-confidence",
+        type=float,
+        default=0.50,
+        help="Use the classifier label only when its top-1 probability reaches this threshold.",
+    )
+    parser.add_argument(
+        "--classifier-min-margin",
+        type=float,
+        default=0.05,
+        help="Use the classifier label only when top-1 minus top-2 reaches this threshold.",
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
