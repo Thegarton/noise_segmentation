@@ -20,7 +20,9 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from sign_type_classifier.dataset import (  # noqa: E402
+    CLASSIFIER_CLASS_NAMES,
     CLASS_NAMES,
+    NOT_A_SIGN_CLASS,
     IMAGE_SUFFIXES,
     assign_grouped_splits,
     load_jsonl,
@@ -119,7 +121,7 @@ def reindex_in_place(
 
     updated = assign_grouped_splits(
         updated,
-        class_names=CLASS_NAMES,
+        class_names=CLASSIFIER_CLASS_NAMES,
         seed=seed,
         train_ratio=train_ratio,
         val_ratio=val_ratio,
@@ -144,7 +146,8 @@ def reindex_in_place(
     dataset_manifest = read_json_object(dataset_manifest_path)
     dataset_manifest.update(
         {
-            "class_names": list(CLASS_NAMES),
+            "class_names": list(CLASSIFIER_CLASS_NAMES),
+            "detection_class_names": list(CLASS_NAMES),
             "summary": summary,
             "split": split_metadata(seed=seed, train_ratio=train_ratio, val_ratio=val_ratio),
         }
@@ -153,7 +156,7 @@ def reindex_in_place(
     previous_removed = {str(value) for value in manual_review.get("removed_sample_ids", [])}
     manual_review.update(
         {
-            "folders": [f"review/{label}" for label in CLASS_NAMES],
+            "folders": [f"review/{label}" for label in CLASSIFIER_CLASS_NAMES],
             "last_reindexed_at": reviewed_at,
             "moved_samples": moved,
             "removed_samples": len(previous_removed | set(removed_ids)),
@@ -187,8 +190,11 @@ def merge_datasets(
     for dataset_dir in dataset_dirs:
         dataset_manifest = read_json_object(dataset_dir / "dataset_manifest.json")
         class_names = tuple(dataset_manifest.get("class_names", CLASS_NAMES))
-        if class_names != CLASS_NAMES:
-            raise ValueError(f"Dataset {dataset_dir} classes are {class_names}, expected {CLASS_NAMES}")
+        if class_names not in (CLASS_NAMES, CLASSIFIER_CLASS_NAMES):
+            raise ValueError(
+                f"Dataset {dataset_dir} classes are {class_names}, expected "
+                f"{CLASS_NAMES} or {CLASSIFIER_CLASS_NAMES}"
+            )
         feature_names = tuple(dataset_manifest.get("numeric_feature_names", ()))
         if expected_feature_names is None:
             expected_feature_names = feature_names
@@ -229,7 +235,7 @@ def merge_datasets(
 
     records = assign_grouped_splits(
         [plan.record for plan in plans],
-        class_names=CLASS_NAMES,
+        class_names=CLASSIFIER_CLASS_NAMES,
         seed=seed,
         train_ratio=train_ratio,
         val_ratio=val_ratio,
@@ -250,7 +256,7 @@ def merge_datasets(
         return result
 
     prepare_merge_output(out_dir, overwrite=overwrite)
-    for label in CLASS_NAMES:
+    for label in CLASSIFIER_CLASS_NAMES:
         (out_dir / "review" / label).mkdir(parents=True, exist_ok=True)
     for plan in plans:
         record = by_sample_id[str(plan.record["sample_id"])]
@@ -264,13 +270,17 @@ def merge_datasets(
             "mode": "merged_reviewed_sign_type_dataset",
             "out_dir": str(out_dir),
             "created_at": utc_now(),
-            "class_names": list(CLASS_NAMES),
+            "class_names": list(CLASSIFIER_CLASS_NAMES),
+            "detection_class_names": list(CLASS_NAMES),
             "numeric_feature_names": list(expected_feature_names or ()),
             "inputs": input_summaries,
             "split": split_metadata(seed=seed, train_ratio=train_ratio, val_ratio=val_ratio),
             "manual_review": {
-                "folders": [f"review/{label}" for label in CLASS_NAMES],
-                "instructions": "Move or delete JPGs, then run reindex_dataset.py again.",
+                "folders": [f"review/{label}" for label in CLASSIFIER_CLASS_NAMES],
+                "instructions": (
+                    "Move sign JPGs between class folders, put false positives in not_a_sign, "
+                    "or delete samples that must be excluded; then reindex again."
+                ),
             },
             "summary": summary,
             "manifest_jsonl": str(out_dir / "manifest.jsonl"),
@@ -281,9 +291,11 @@ def merge_datasets(
 
 def scan_review_folders(dataset_dir: Path) -> dict[str, tuple[str, Path]]:
     result: dict[str, tuple[str, Path]] = {}
-    for label in CLASS_NAMES:
+    for label in CLASSIFIER_CLASS_NAMES:
         class_dir = dataset_dir / "review" / label
         if not class_dir.is_dir():
+            if label == NOT_A_SIGN_CLASS:
+                continue
             raise FileNotFoundError(f"Missing review folder for {label!r}: {class_dir}")
         for path in sorted(class_dir.iterdir()):
             if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:

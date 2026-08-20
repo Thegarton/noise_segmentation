@@ -13,5 +13,11 @@ dependencies = [
   "Pillow>=10.0",
 ]
 
+[project.optional-dependencies]
+training = [
+  "torch>=2.1",
+  "torchvision>=0.16",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]

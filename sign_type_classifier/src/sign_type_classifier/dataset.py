@@ -20,6 +20,8 @@ CLASS_NAMES = (
     "side_plate",
     "induction_sign",
 )
+NOT_A_SIGN_CLASS = "not_a_sign"
+CLASSIFIER_CLASS_NAMES = (*CLASS_NAMES, NOT_A_SIGN_CLASS)
 IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".webp"})
 
 

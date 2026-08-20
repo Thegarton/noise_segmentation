@@ -68,6 +68,12 @@ PYTHONPATH=src conda run -p /home/a60116606/miniconda3/envs/sam3 \
 The four paths may still be overridden individually with `--prompt-config`,
 `--classes-yaml`, `--label-min-score`, and `--csv-tags-yaml`.
 
+Add `--colour-correction` when source camera images need white balancing. It
+applies the main OpenCV `SimpleWB(P=0.5)` plus gray-world correction in memory
+and passes the corrected RGB directly to SAM3. The flag is disabled by default;
+no corrected full-frame image is written, and saved overlays use the original
+camera image.
+
 Each `imgMatch.txt` row has the form
 `LIDAR_FRAME>>IMAGE_NAME>>SIGNED_TIME_DIFFERENCE`. `--start-frame` and
 `--end-frame` filter the first column. If several images reference the same

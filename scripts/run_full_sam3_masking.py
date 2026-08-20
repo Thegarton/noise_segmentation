@@ -319,6 +319,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compute the single-image visual backbone once and reuse it for all text prompts.",
     )
     parser.add_argument(
+        "--colour-correction",
+        "--color-correction",
+        dest="colour_correction",
+        action="store_true",
+        help=(
+            "Apply SimpleWB (P=0.5) and gray-world correction in memory before "
+            "SAM3. Disabled by default; corrected full-frame images are not saved."
+        ),
+    )
+    parser.add_argument(
         "--save-intermediate-outputs",
         action="store_true",
         help=(
@@ -635,6 +645,7 @@ def run_sam3(
         prompt_log=args.prompt_log,
         inference_precision=args.inference_precision,
         cache_visual_features=args.cache_visual_features,
+        colour_correction=args.colour_correction,
         save_outputs=args.save_intermediate_outputs,
         frame_image_pairs=None
         if matches is None

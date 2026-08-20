@@ -24,6 +24,7 @@ if str(SRC_ROOT) not in sys.path:
 from sign_type_classifier.clustering import SignCandidate, cluster_sign_detections  # noqa: E402
 from sign_type_classifier.colour_correction import simple_colour_correction_rgb  # noqa: E402
 from sign_type_classifier.dataset import (  # noqa: E402
+    CLASSIFIER_CLASS_NAMES,
     CLASS_NAMES,
     assign_grouped_splits,
     collect_source_images,
@@ -76,7 +77,7 @@ def main() -> None:
         overwrite=bool(args.overwrite),
         resume=bool(args.resume),
     )
-    for label in CLASS_NAMES:
+    for label in CLASSIFIER_CLASS_NAMES:
         (out_dir / "review" / label).mkdir(parents=True, exist_ok=True)
 
     prompts_by_label = load_prompt_config(prompt_config)
@@ -274,8 +275,11 @@ def main() -> None:
         "numeric_feature_names": list(feature_names),
         "split": split_metadata(seed=args.seed, train_ratio=args.train_ratio, val_ratio=args.val_ratio),
         "manual_review": {
-            "folders": [f"review/{label}" for label in CLASS_NAMES],
-            "instructions": "Move review JPGs between class folders or delete false positives, then run reindex_dataset.py.",
+            "folders": [f"review/{label}" for label in CLASSIFIER_CLASS_NAMES],
+            "instructions": (
+                "Move review JPGs between sign folders, move false positives to review/not_a_sign, "
+                "or delete samples that must be excluded; then run reindex_dataset.py."
+            ),
         },
         "summary": summary,
         "sources": source_results,
@@ -648,7 +652,7 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run SAM3 sign prompts on images and build six manually reviewable class folders."
+        description="Run SAM3 sign prompts and build six sign folders plus not_a_sign for manual review."
     )
     parser.add_argument("--source-root", required=True, help="Directory with source images.")
     parser.add_argument("--out-dir", required=True)

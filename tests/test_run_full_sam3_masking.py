@@ -61,6 +61,7 @@ def test_short_cli_uses_production_defaults() -> None:
     assert args.overwrite is True
     assert args.log_json is True
     assert args.cache_visual_features is True
+    assert args.colour_correction is False
     assert args.save_intermediate_outputs is False
     assert args.vehicle_orientation_device == "cuda"
     assert args.vehicle_orientation_min_confidence == 0.60
@@ -169,6 +170,7 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
 
     assert captured["save_outputs"] is False
     assert captured["cache_visual_features"] is True
+    assert captured["colour_correction"] is False
     assert captured["log_json"] is True
     assert captured["frame_image_pairs"] == [
         ("000101", (image_dir / "000010.jpg").resolve()),
@@ -228,10 +230,12 @@ def test_intermediate_output_flag_is_forwarded_to_sam3(tmp_path: Path, monkeypat
             "--end-frame",
             "101",
             "--save-intermediate-outputs",
+            "--colour-correction",
         ]
     )
 
     assert captured["save_outputs"] is True
+    assert captured["colour_correction"] is True
     assert (output_dir / "000101" / "metadata.json").is_file()
     assert (output_dir / "sam3_run_summary.csv").is_file()
 

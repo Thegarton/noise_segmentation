@@ -5,14 +5,14 @@ reviewable dataset for six visually similar sign and clearance-bar classes. The
 input directory must already contain prepared or defisheye images; this project
 does not alter camera geometry.
 
-The current stage builds and maintains the dataset only. Numeric and image
-classifiers will be trained in a later stage. Each sample already contains both
-the context image and a stable numeric feature vector required by that future
-ensemble.
+The project builds the reviewed dataset and trains a two-branch classifier.
+EfficientNet-B0 reads the context crop, while a small MLP reads position,
+geometry, mask, colour, edge, and SAM3-score features. Their probabilities are
+combined with a weight selected on the validation split.
 
 ## Classes
 
-The class order is fixed:
+The classifier class order is fixed:
 
 1. `height_restriction_sign_at_underground`
 2. `height_restriction_barrel`
@@ -20,9 +20,11 @@ The class order is fixed:
 4. `overhead_traffic_sign`
 5. `side_plate`
 6. `induction_sign`
+7. `not_a_sign` (false-positive SAM3 detections)
 
-Prompts live in `configs/sign_type_prompts.yaml`. Every prompt group must be
-present and non-empty.
+Prompts live in `configs/sign_type_prompts.yaml`. The first six prompt groups
+must be present and non-empty. `not_a_sign` has no prompt; it is populated by
+manual review.
 
 ## Install
 
@@ -115,8 +117,10 @@ cropping does not discard it.
 
 ## Manual Review
 
-Move incorrect review JPGs into the correct class folder. Delete a review JPG
-to remove a false positive. Do not rename retained files.
+Move incorrect review JPGs into the correct class folder. Move false-positive
+detections into `review/not_a_sign`; they are useful negative examples for the
+classifier. Delete a file only when it must be excluded from training entirely.
+Do not rename retained files.
 
 Preview changes without writing:
 
@@ -150,3 +154,75 @@ python sign_type_classifier/scripts/reindex_dataset.py \
 
 Input datasets are not modified. Sample and source ids are namespaced before
 copying, so identical image names from different rounds do not collide.
+
+## Train Numeric + EfficientNet Ensemble
+
+Install the training dependencies in the SAM3 environment:
+
+```bash
+conda run -p /home/a60116606/miniconda3/envs/sam3 \
+  pip install -e './sign_type_classifier[training]'
+```
+
+After manually reviewing and merging the datasets, train the ensemble:
+
+```bash
+conda run -p /home/a60116606/miniconda3/envs/sam3 \
+  python sign_type_classifier/scripts/train.py \
+  --manifest ./output/sign_type_dataset_merged/manifest.jsonl \
+  --out-dir ./output/sign_type_classifier_ensemble \
+  --epochs 30 \
+  --batch-size 32 \
+  --num-workers 4 \
+  --device cuda \
+  --overwrite
+```
+
+Run `reindex_dataset.py` before training. The training split must contain all
+six sign classes and `not_a_sign`. All crops from one source frame stay in the
+same split, preventing nearly identical signs from leaking between train and
+validation.
+
+The image branch receives `context_rgb.png`, not the tight masked crop, so it
+can distinguish overhead, underground, and roadside signs from their scene
+context. The numeric MLP receives the stored `numeric_feature_vector`, which
+contains normalized bbox position and size, mask geometry, object/context
+colour histograms, brightness, edge density, and all original SAM3 class
+scores.
+
+For the first three epochs only the EfficientNet classifier head and numeric
+MLP are trained. The EfficientNet backbone is then unfrozen. Both branches use
+class-weighted cross entropy. After each epoch the script searches for the
+image/numeric probability weight that gives the best validation macro-F1.
+
+Outputs:
+
+```text
+<out-dir>/
+  model_best.pth
+  model_last.pth
+  model_config.json
+  metrics.json
+  history.json
+  split_manifest.jsonl
+```
+
+`metrics.json` reports precision, recall, F1, and confusion matrices separately
+for `image`, `numeric`, and `ensemble`. This makes it possible to see whether
+position/geometry really improves a particular sign class.
+
+## Evaluate A Checkpoint
+
+```bash
+conda run -p /home/a60116606/miniconda3/envs/sam3 \
+  python sign_type_classifier/scripts/predict.py \
+  --manifest ./output/sign_type_dataset_merged/manifest.jsonl \
+  --checkpoint ./output/sign_type_classifier_ensemble/model_best.pth \
+  --output-jsonl ./output/sign_type_classifier_ensemble/test_predictions.jsonl \
+  --split test \
+  --device cuda
+```
+
+The prediction JSONL includes ensemble, EfficientNet, and numeric probabilities
+for every sample. A neighboring `.metrics.json` contains aggregate test
+metrics.

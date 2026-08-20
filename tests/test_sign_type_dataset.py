@@ -18,10 +18,18 @@ if str(PACKAGE_SRC) not in sys.path:
 from sign_type_classifier.clustering import SignDetection, cluster_sign_detections  # noqa: E402
 from sign_type_classifier import colour_correction as sign_colour_correction  # noqa: E402
 from sign_type_classifier.dataset import (  # noqa: E402
+    CLASSIFIER_CLASS_NAMES,
     CLASS_NAMES,
+    NOT_A_SIGN_CLASS,
     assign_grouped_splits,
     load_jsonl,
     write_jsonl,
+)
+from sign_type_classifier.model import (  # noqa: E402
+    blend_probabilities,
+    compute_numeric_normalization,
+    decisions_from_probabilities,
+    standardize_numeric_features,
 )
 from sign_type_classifier.detection_filters import (  # noqa: E402
     filter_detections,
@@ -518,6 +526,48 @@ def test_reindex_moves_and_deletes_review_samples(tmp_path: Path, monkeypatch: p
     assert all(item["sample_id"] != records[2]["sample_id"] for item in updated)
     manifest = json.loads((dataset_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
     assert manifest["manual_review"]["removed_sample_ids"] == [records[2]["sample_id"]]
+
+
+def test_reindex_keeps_not_a_sign_as_classifier_class(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    reindex = load_reindex_script()
+    dataset_dir = tmp_path / "dataset"
+    records = create_review_dataset(dataset_dir, labels=("side_plate", "induction_sign"))
+    not_a_sign_dir = dataset_dir / "review" / NOT_A_SIGN_CLASS
+    not_a_sign_dir.mkdir(parents=True)
+    moved = not_a_sign_dir / f"{records[0]['sample_id']}.jpg"
+    (dataset_dir / records[0]["review_image"]).replace(moved)
+    monkeypatch.setattr(sys, "argv", ["reindex_dataset.py", "--dataset-dir", str(dataset_dir)])
+
+    reindex.main()
+
+    updated = load_jsonl(dataset_dir / "manifest.jsonl")
+    assert len(updated) == 2
+    negative = next(item for item in updated if item["sample_id"] == records[0]["sample_id"])
+    assert negative["label"] == NOT_A_SIGN_CLASS
+    manifest = json.loads((dataset_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
+    assert tuple(manifest["class_names"]) == CLASSIFIER_CLASS_NAMES
+
+
+def test_numeric_normalization_and_probability_fusion():
+    values = np.asarray([[1.0, 2.0, 5.0], [3.0, 2.0, 9.0]], dtype=np.float32)
+    mean, std = compute_numeric_normalization(values)
+    normalized = standardize_numeric_features(values, mean=mean, std=std)
+
+    assert np.allclose(normalized.mean(axis=0), 0.0)
+    assert np.allclose(normalized[:, 1], 0.0)
+
+    image = np.zeros((1, len(CLASSIFIER_CLASS_NAMES)), dtype=np.float32)
+    numeric = np.zeros_like(image)
+    image[0, 0] = 1.0
+    numeric[0, 1] = 1.0
+    fused = blend_probabilities(image, numeric, image_weight=0.75)
+    decisions = decisions_from_probabilities(
+        fused,
+        image_probabilities=image,
+        numeric_probabilities=numeric,
+    )
+    assert decisions[0].label == CLASSIFIER_CLASS_NAMES[0]
+    assert decisions[0].confidence == pytest.approx(0.75)
 
 
 def test_reindex_merges_datasets_with_colliding_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

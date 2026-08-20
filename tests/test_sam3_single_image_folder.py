@@ -53,6 +53,75 @@ def test_extract_arrays_accepts_sam3_31_output_keys():
     np.testing.assert_allclose(boxes, np.asarray([[0.1, 0.2, 0.3, 0.4]], dtype=np.float32))
 
 
+def test_colour_correction_is_passed_to_sam3_in_memory_but_original_is_saved(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import pytest
+
+    pil = pytest.importorskip("PIL.Image")
+    script = load_script()
+    source_rgb = np.full((3, 5, 3), (10, 20, 30), dtype=np.uint8)
+    image_path = tmp_path / "source.png"
+    pil.fromarray(source_rgb).save(image_path)
+
+    class FakePredictor:
+        def __init__(self):
+            self.default_output_prob_thresh = 0.0
+            self.model = SimpleNamespace(
+                score_threshold_detection=0.0,
+                image_only_det_thresh=0.0,
+                new_det_thresh=0.0,
+            )
+            self.requests = []
+
+        def handle_request(self, *, request):
+            self.requests.append(request)
+            if request["type"] == "start_session":
+                return {"session_id": "test-session"}
+            if request["type"] == "add_prompt":
+                return {
+                    "outputs": {
+                        "out_binary_masks": np.zeros((0, 3, 5), dtype=bool),
+                        "out_probs": np.zeros((0,), dtype=np.float32),
+                    }
+                }
+            return {}
+
+    predictor = FakePredictor()
+    corrected_rgb = np.full_like(source_rgb, 77)
+    saved = {}
+    monkeypatch.setattr(
+        script,
+        "apply_simple_colour_correction_rgb",
+        lambda image_rgb: corrected_rgb.copy(),
+    )
+    monkeypatch.setattr(
+        script,
+        "save_image_outputs",
+        lambda **kwargs: saved.update(image=np.asarray(kwargs["image"], dtype=np.uint8)),
+    )
+
+    script.process_image(
+        predictor=predictor,
+        image_path=image_path,
+        output_dir=tmp_path / "output",
+        flat_prompts=[("CAR", "car")],
+        label_to_id={"CAR": 2},
+        min_score=0.5,
+        label_min_scores={},
+        prompt_log=False,
+        min_mask_size=1,
+        colour_correction=True,
+        save_outputs=True,
+    )
+
+    resource = predictor.requests[0]["resource_path"]
+    assert isinstance(resource, list) and len(resource) == 1
+    np.testing.assert_array_equal(np.asarray(resource[0]), corrected_rgb)
+    np.testing.assert_array_equal(saved["image"], source_rgb)
+
+
 def test_build_semantic_outputs_keeps_highest_score():
     script = load_script()
     mask_a = np.zeros((2, 2), dtype=bool)

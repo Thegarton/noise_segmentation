@@ -111,14 +111,23 @@ def process_image(
     vehicle_orientation_min_confidence: float = 0.70,
     vehicle_orientation_min_margin: float = 0.10,
     vehicle_orientation_nms_iou: float = 0.80,
+    colour_correction: bool = False,
     save_outputs: bool = True,
 ) -> ImageResult:
     from PIL import Image  # noqa: WPS433
 
-    image = Image.open(image_path).convert("RGB")
-    width, height = image.size
+    with Image.open(image_path) as opened_image:
+        source_image = opened_image.convert("RGB")
+    width, height = source_image.size
+    model_image_rgb = np.asarray(source_image, dtype=np.uint8)
+    if colour_correction:
+        model_image_rgb = apply_simple_colour_correction_rgb(model_image_rgb)
     clear_visual_feature_cache(predictor)
-    session_id = start_session(predictor, image_path)
+    session_id = start_session(
+        predictor,
+        image_path,
+        image_rgb=model_image_rgb if colour_correction else None,
+    )
     instances: list[Sam3Instance] = []
     try:
         for prompt_idx, (label, prompt) in enumerate(flat_prompts, start=1):
@@ -173,7 +182,7 @@ def process_image(
         if vehicle_class_mapping is None:
             raise ValueError("vehicle_class_mapping is required when the orientation classifier is enabled")
         instances = apply_vehicle_orientation(
-            image_rgb=np.asarray(image, dtype=np.uint8),
+            image_rgb=model_image_rgb,
             instances=instances,
             classifier=vehicle_orientation_classifier,
             vehicle_prompt_label=vehicle_prompt_label,
@@ -198,7 +207,7 @@ def process_image(
     )
     if save_outputs:
         save_image_outputs(
-            image=image,
+            image=source_image,
             image_path=image_path,
             output_dir=output_dir,
             instances=instances,
@@ -221,11 +230,40 @@ def process_image(
     )
 
 
-def start_session(predictor: Any, image_path: Path) -> str:
+def apply_simple_colour_correction_rgb(image_rgb: np.ndarray) -> np.ndarray:
+    """Apply the main BGR SimpleWB pipeline and return contiguous RGB."""
+    from autolabeler.camera.colour_correction import simple_colour_correction  # noqa: WPS433
+
+    array = np.asarray(image_rgb, dtype=np.uint8)
+    if array.ndim != 3 or array.shape[2] != 3:
+        raise ValueError(f"image_rgb must have shape [H,W,3], got {array.shape}")
+    image_bgr = np.ascontiguousarray(array[..., ::-1])
+    corrected_bgr = simple_colour_correction(image_bgr)
+    corrected_rgb = np.asarray(corrected_bgr, dtype=np.uint8)[..., ::-1]
+    return np.ascontiguousarray(corrected_rgb)
+
+
+def start_session(
+    predictor: Any,
+    image_path: Path,
+    *,
+    image_rgb: np.ndarray | None = None,
+) -> str:
+    if image_rgb is None:
+        resource: Any = str(image_path)
+    else:
+        from PIL import Image  # noqa: WPS433
+
+        array = np.asarray(image_rgb)
+        if array.ndim != 3 or array.shape[2] != 3 or array.dtype != np.uint8:
+            raise ValueError(
+                f"image_rgb must be uint8[H,W,3], got {array.shape} {array.dtype}"
+            )
+        resource = [Image.fromarray(np.ascontiguousarray(array))]
     response = predictor.handle_request(
         request={
             "type": "start_session",
-            "resource_path": str(image_path),
+            "resource_path": resource,
         }
     )
     return str(response["session_id"])
@@ -1323,6 +1361,7 @@ def sam3_single_image_folder(
     inference_precision="auto",
     cache_visual_features=False,
     frame_image_pairs=None,
+    colour_correction=False,
     save_outputs=True,
 ) -> FolderDetectionSummary:
 
@@ -1514,6 +1553,7 @@ def sam3_single_image_folder(
             vehicle_orientation_min_confidence=vehicle_orientation_min_confidence,
             vehicle_orientation_min_margin=vehicle_orientation_min_margin,
             vehicle_orientation_nms_iou=vehicle_orientation_nms_iou,
+            colour_correction=colour_correction,
             save_outputs=save_outputs,
         )
         processing_time_seconds = time.perf_counter() - frame_started_at
@@ -1542,6 +1582,7 @@ def sam3_single_image_folder(
             "processing_time_seconds": round(processing_time_seconds, 6),
             "sam3_runtime": sam3_runtime_summary(predictor),
             "physical_gpu_id": os.environ.get("SAM3_PHYSICAL_GPU_ID"),
+            "colour_correction": bool(colour_correction),
             "vehicle_orientation": {
                 "enabled": vehicle_orientation_classifier is not None,
                  "mode": vehicle_orientation_mode,
@@ -1606,6 +1647,7 @@ def sam3_single_image_folder(
         "frames": results,
         "sam3_runtime": sam3_runtime_summary(predictor),
         "physical_gpu_id": os.environ.get("SAM3_PHYSICAL_GPU_ID"),
+        "colour_correction": bool(colour_correction),
         "vehicle_orientation": {
             "enabled": vehicle_orientation_classifier is not None,
             "mode": vehicle_orientation_mode,
