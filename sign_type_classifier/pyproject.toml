@@ -18,6 +18,11 @@ training = [
   "torch>=2.1",
   "torchvision>=0.16",
 ]
+analysis = [
+  "jupyterlab>=4.0",
+  "matplotlib>=3.7",
+  "pandas>=2.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -226,3 +226,23 @@ conda run -p /home/a60116606/miniconda3/envs/sam3 \
 The prediction JSONL includes ensemble, EfficientNet, and numeric probabilities
 for every sample. A neighboring `.metrics.json` contains aggregate test
 metrics.
+
+## Feature Analysis Notebook
+
+Open `notebooks/sign_type_feature_analysis.ipynb` after reindexing or merging
+the reviewed datasets. Set `DATASET_DIR` in its configuration cell. The
+notebook visualizes class/split balance, source-frame counts, bbox geometry,
+absolute image position, mask shape, object/context colour, edge density, SAM3
+scores, per-feature Fisher separation, PCA, class-centroid distances, and the
+initial-SAM3-versus-manual confusion matrix. It also exports compact CSV reports
+to `<dataset-dir>/feature_analysis`.
+
+Optional notebook dependencies can be installed with:
+
+```bash
+pip install -e './sign_type_classifier[analysis]'
+```
+
+After training, point `PREDICTIONS_JSONL` to the output of `predict.py` to
+compare normalized confusion matrices for the EfficientNet branch, numeric
+branch, and final ensemble.
