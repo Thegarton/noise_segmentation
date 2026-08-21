@@ -761,6 +761,77 @@ def test_reindex_merges_datasets_with_colliding_ids(tmp_path: Path, monkeypatch:
     assert all((merged / item["metadata"]).is_file() for item in records)
 
 
+def test_sign_training_transform_contains_expected_augmentations():
+    torch = pytest.importorskip("torch")
+    torchvision = pytest.importorskip("torchvision")
+    pil_image = pytest.importorskip("PIL.Image")
+    trainer = load_train_script()
+
+    train_transform = trainer._build_transform(
+        torchvision.transforms,
+        input_size=224,
+        training=True,
+    )
+    validation_transform = trainer._build_transform(
+        torchvision.transforms,
+        input_size=224,
+        training=False,
+    )
+
+    train_names = [type(operation).__name__ for operation in train_transform.transforms]
+    validation_names = [type(operation).__name__ for operation in validation_transform.transforms]
+    assert train_names == [
+        "Lambda",
+        "RandomHorizontalFlip",
+        "RandomRotation",
+        "RandomPerspective",
+        "RandomAffine",
+        "RandomApply",
+        "RandomPosterize",
+        "RandomAutocontrast",
+        "ToTensor",
+        "Normalize",
+    ]
+    assert validation_names == ["Lambda", "ToTensor", "Normalize"]
+
+    image = pil_image.fromarray(np.full((90, 160, 3), 128, dtype=np.uint8), mode="RGB")
+    tensor = train_transform(image)
+    assert tuple(tensor.shape) == (3, 224, 224)
+    assert torch.isfinite(tensor).all()
+
+
+def test_sign_training_checkpoint_records_augmentation_metadata():
+    torch = pytest.importorskip("torch")
+    trainer = load_train_script()
+    image_model = torch.nn.Sequential(torch.nn.Linear(2, 2))
+    numeric_model = torch.nn.Sequential(torch.nn.Linear(2, 2))
+    optimizer = torch.optim.AdamW(
+        list(image_model.parameters()) + list(numeric_model.parameters())
+    )
+    args = SimpleNamespace(
+        numeric_hidden_size=128,
+        numeric_dropout=0.2,
+        input_size=224,
+    )
+
+    checkpoint = trainer._checkpoint_payload(
+        image_model=image_model,
+        numeric_model=numeric_model,
+        optimizer=optimizer,
+        epoch=1,
+        args=args,
+        feature_names=("bbox_x0", "bbox_y0"),
+        numeric_mean=np.zeros(2, dtype=np.float32),
+        numeric_std=np.ones(2, dtype=np.float32),
+        class_weights=[1.0] * len(CLASSIFIER_CLASS_NAMES),
+        fusion_image_weight=0.5,
+        metrics={},
+    )
+
+    assert checkpoint["train_augmentation"] == trainer.TRAIN_AUGMENTATION_CONFIG
+    assert checkpoint["train_augmentation"]["random_perspective"]["p"] == 0.20
+
+
 def create_review_dataset(dataset_dir: Path, *, labels: tuple[str, ...]) -> list[dict]:
     for class_name in CLASS_NAMES:
         (dataset_dir / "review" / class_name).mkdir(parents=True, exist_ok=True)
@@ -803,6 +874,13 @@ def load_reindex_script():
     return load_script(
         "sign_type_reindex_dataset",
         PROJECT_ROOT / "sign_type_classifier" / "scripts" / "reindex_dataset.py",
+    )
+
+
+def load_train_script():
+    return load_script(
+        "sign_type_train",
+        PROJECT_ROOT / "sign_type_classifier" / "scripts" / "train.py",
     )
 
 

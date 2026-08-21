@@ -35,6 +35,32 @@ from sign_type_classifier.model import (  # noqa: E402
 )
 
 
+TRAIN_AUGMENTATION_CONFIG: dict[str, Any] = {
+    "letterbox_fill": 127,
+    "random_horizontal_flip": {"p": 0.50},
+    "random_rotation": {"degrees": 7.0, "fill": 127},
+    "random_perspective": {
+        "distortion_scale": 0.15,
+        "p": 0.20,
+        "fill": 127,
+    },
+    "random_affine": {
+        "degrees": 0.0,
+        "translate": [0.04, 0.04],
+        "scale": [0.90, 1.10],
+        "shear": [-3.0, 3.0],
+        "fill": 127,
+    },
+    "gaussian_blur": {
+        "kernel_size": 3,
+        "sigma": [0.1, 1.2],
+        "p": 0.15,
+    },
+    "random_posterize": {"bits": 5, "p": 0.10},
+    "random_autocontrast": {"p": 0.20},
+}
+
+
 @dataclass(frozen=True)
 class EpochOutput:
     summary: dict[str, Any]
@@ -289,6 +315,7 @@ def main() -> None:
             "fusion_numeric_weight": 1.0 - best_image_weight,
             "image_input": "context_rgb",
             "numeric_input": "numeric_feature_vector",
+            "train_augmentation": TRAIN_AUGMENTATION_CONFIG,
         },
     )
     shutil.copy2(manifest_path, out_dir / "split_manifest.jsonl")
@@ -518,28 +545,61 @@ def _validate_records(
 def _build_transform(transforms: Any, *, input_size: int, training: bool) -> Any:
     from PIL import Image, ImageOps  # noqa: WPS433
 
+    config = TRAIN_AUGMENTATION_CONFIG
+
     def letterbox(image: Any) -> Any:
         contained = ImageOps.contain(image, (input_size, input_size), method=Image.Resampling.BILINEAR)
-        canvas = Image.new("RGB", (input_size, input_size), color=(127, 127, 127))
+        fill = int(config["letterbox_fill"])
+        canvas = Image.new("RGB", (input_size, input_size), color=(fill, fill, fill))
         canvas.paste(contained, ((input_size - contained.width) // 2, (input_size - contained.height) // 2))
         return canvas
 
     operations: list[Any] = [transforms.Lambda(letterbox)]
     if training:
+        horizontal_flip = config["random_horizontal_flip"]
+        rotation = config["random_rotation"]
+        perspective = config["random_perspective"]
+        affine = config["random_affine"]
+        blur = config["gaussian_blur"]
+        posterize = config["random_posterize"]
+        autocontrast = config["random_autocontrast"]
+        interpolation = transforms.InterpolationMode.BILINEAR
         operations.extend(
             [
-                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomHorizontalFlip(p=float(horizontal_flip["p"])),
+                transforms.RandomRotation(
+                    degrees=float(rotation["degrees"]),
+                    interpolation=interpolation,
+                    fill=int(rotation["fill"]),
+                ),
+                transforms.RandomPerspective(
+                    distortion_scale=float(perspective["distortion_scale"]),
+                    p=float(perspective["p"]),
+                    interpolation=interpolation,
+                    fill=int(perspective["fill"]),
+                ),
                 transforms.RandomAffine(
-                    degrees=3.0,
-                    translate=(0.03, 0.03),
-                    scale=(0.90, 1.10),
-                    fill=127,
+                    degrees=float(affine["degrees"]),
+                    translate=tuple(float(value) for value in affine["translate"]),
+                    scale=tuple(float(value) for value in affine["scale"]),
+                    shear=tuple(float(value) for value in affine["shear"]),
+                    interpolation=interpolation,
+                    fill=int(affine["fill"]),
                 ),
-                transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.10, hue=0.02),
                 transforms.RandomApply(
-                    [transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.2))],
-                    p=0.15,
+                    [
+                        transforms.GaussianBlur(
+                            kernel_size=int(blur["kernel_size"]),
+                            sigma=tuple(float(value) for value in blur["sigma"]),
+                        )
+                    ],
+                    p=float(blur["p"]),
                 ),
+                transforms.RandomPosterize(
+                    bits=int(posterize["bits"]),
+                    p=float(posterize["p"]),
+                ),
+                transforms.RandomAutocontrast(p=float(autocontrast["p"])),
             ]
         )
     operations.extend(
@@ -592,6 +652,7 @@ def _checkpoint_payload(
         "input_size": int(args.input_size),
         "class_weights": class_weights,
         "fusion_image_weight": float(fusion_image_weight),
+        "train_augmentation": TRAIN_AUGMENTATION_CONFIG,
         "metrics": metrics,
     }
 
