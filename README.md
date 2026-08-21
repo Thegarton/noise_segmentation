@@ -155,8 +155,38 @@ builds a manually reviewable dataset for six similar roadside, overhead, and
 underground sign types. It accepts already prepared images, loads SAM3 once,
 clusters duplicate masks across class-specific prompts, and auto-sorts every
 candidate into class folders. Context crops, full-image position, all SAM3
-scores, and numeric appearance features are retained for a later CPU/image
-classifier ensemble. This stage does not train or load another classifier.
+scores, and numeric appearance features are used by the trained EfficientNet
+plus numeric-MLP ensemble.
+
+The trained ensemble can reclassify sign masks in the production run:
+
+```bash
+python scripts/run_full_sam3_masking.py \
+  --sensor-version HL320 \
+  --image-path /path/to/Image \
+  --img-match /path/to/imgMatch.txt \
+  --img-time-map /path/to/imgTimeMap.txt \
+  --output-path ./output/sam3_run \
+  --gpu-num 0 \
+  --data-name dataset_name \
+  --start-frame 1 \
+  --end-frame 50 \
+  --sign-classifier-checkpoint ./output/sign_type_classifier_ensemble/model_best.pth \
+  --sign-classifier-device cpu \
+  --sign-classifier-min-confidence 0.50 \
+  --sign-classifier-min-margin 0.05
+```
+
+SAM3 first evaluates all six sign prompt groups. Overlapping masks are clustered
+using `--sign-classifier-cluster-iou` and
+`--sign-classifier-cluster-containment`; the classifier then receives the
+canonical mask, a `3x` context crop, full-image geometry, colour/edge features,
+and all six SAM3 class scores. An accepted prediction supplies the final class
+id while preserving the SAM3 mask. `not_a_sign` removes the candidate. A low
+confidence or low-margin prediction falls back to SAM3 top-1. The active prompt
+and classes YAML files must contain all six sign labels used to train the
+checkpoint. Without `--sign-classifier-checkpoint`, the original SAM3 behavior
+is unchanged.
 
 After all prompts have run, masks are deduplicated independently for every
 label. For masks of the same label, the highest-confidence mask is kept and

@@ -430,6 +430,156 @@ def test_deduplicate_instances_applies_per_label_and_preserves_other_classes():
     assert [item.score for item in output] == [0.93, 0.75, 0.70]
 
 
+def test_sign_classifier_clusters_cross_prompt_masks_and_routes_final_class():
+    import pytest
+
+    pytest.importorskip("cv2")
+    script = load_script()
+    local_src = script.REPO_ROOT / "sign_type_classifier" / "src"
+    if str(local_src) not in sys.path:
+        sys.path.insert(0, str(local_src))
+    from sign_type_classifier.features import numeric_feature_names
+
+    first_mask = np.zeros((20, 20), dtype=bool)
+    first_mask[2:8, 3:13] = True
+    second_mask = np.zeros((20, 20), dtype=bool)
+    second_mask[11:17, 2:8] = True
+    labels = script.SIGN_TYPE_LABELS
+    instances = [
+        script.Sam3Instance(
+            label="underground_parking_sign",
+            class_id=3,
+            prompt="parking sign",
+            score=0.91,
+            mask=first_mask,
+            box=np.asarray([0.15, 0.10, 0.50, 0.30], dtype=np.float32),
+        ),
+        script.Sam3Instance(
+            label="overhead_traffic_sign",
+            class_id=4,
+            prompt="overhead sign",
+            score=0.88,
+            mask=first_mask.copy(),
+            box=np.asarray([0.15, 0.10, 0.50, 0.30], dtype=np.float32),
+        ),
+        script.Sam3Instance(
+            label="side_plate",
+            class_id=5,
+            prompt="side sign",
+            score=0.82,
+            mask=second_mask,
+            box=np.asarray([0.10, 0.55, 0.30, 0.30], dtype=np.float32),
+        ),
+    ]
+
+    class FakeClassifier:
+        class_names = (*labels, script.SIGN_TYPE_REJECT_LABEL)
+        feature_names = numeric_feature_names(labels)
+
+        def classify(self, context_images, numeric_features):
+            assert len(context_images) == 2
+            assert numeric_features.shape == (2, len(self.feature_names))
+            return [
+                SimpleNamespace(
+                    label="overhead_traffic_sign",
+                    confidence=0.92,
+                    margin=0.71,
+                    probabilities=(0.01, 0.01, 0.02, 0.92, 0.01, 0.02, 0.01),
+                    image_probabilities=(0.01, 0.01, 0.02, 0.92, 0.01, 0.02, 0.01),
+                    numeric_probabilities=(0.01, 0.01, 0.02, 0.92, 0.01, 0.02, 0.01),
+                ),
+                SimpleNamespace(
+                    label="not_a_sign",
+                    confidence=0.90,
+                    margin=0.60,
+                    probabilities=(0.01, 0.01, 0.01, 0.01, 0.03, 0.03, 0.90),
+                    image_probabilities=(0.01, 0.01, 0.01, 0.01, 0.03, 0.03, 0.90),
+                    numeric_probabilities=(0.01, 0.01, 0.01, 0.01, 0.03, 0.03, 0.90),
+                ),
+            ]
+
+    mapping = {label: index + 10 for index, label in enumerate(labels)}
+    output, predictions = script.apply_sign_type_classification(
+        image_rgb=np.full((20, 20, 3), 127, dtype=np.uint8),
+        instances=instances,
+        classifier=FakeClassifier(),
+        class_mapping=mapping,
+        min_confidence=0.5,
+        min_margin=0.05,
+        min_mask_size=4,
+        cluster_iou=0.55,
+        cluster_containment=0.80,
+        context_scale=3.0,
+    )
+
+    assert len(output) == 1
+    assert output[0].label == "overhead_traffic_sign"
+    assert output[0].class_id == mapping["overhead_traffic_sign"]
+    assert output[0].source_label == "underground_parking_sign"
+    assert output[0].sign_classifier_accepted is True
+    assert len(predictions) == 2
+    assert predictions[1]["removed_as_not_a_sign"] is True
+
+
+def test_sign_classifier_low_confidence_falls_back_to_sam3_top1():
+    import pytest
+
+    pytest.importorskip("cv2")
+    script = load_script()
+    local_src = script.REPO_ROOT / "sign_type_classifier" / "src"
+    if str(local_src) not in sys.path:
+        sys.path.insert(0, str(local_src))
+    from sign_type_classifier.features import numeric_feature_names
+
+    labels = script.SIGN_TYPE_LABELS
+    mask = np.zeros((12, 12), dtype=bool)
+    mask[2:9, 2:9] = True
+
+    class FakeClassifier:
+        class_names = (*labels, script.SIGN_TYPE_REJECT_LABEL)
+        feature_names = numeric_feature_names(labels)
+
+        def classify(self, context_images, numeric_features):
+            return [
+                SimpleNamespace(
+                    label="induction_sign",
+                    confidence=0.40,
+                    margin=0.30,
+                    probabilities=(0.10, 0.10, 0.10, 0.10, 0.10, 0.40, 0.10),
+                    image_probabilities=(0.10, 0.10, 0.10, 0.10, 0.10, 0.40, 0.10),
+                    numeric_probabilities=(0.10, 0.10, 0.10, 0.10, 0.10, 0.40, 0.10),
+                )
+            ]
+
+    mapping = {label: index + 10 for index, label in enumerate(labels)}
+    output, predictions = script.apply_sign_type_classification(
+        image_rgb=np.full((12, 12, 3), 127, dtype=np.uint8),
+        instances=[
+            script.Sam3Instance(
+                label="side_plate",
+                class_id=mapping["side_plate"],
+                prompt="side sign",
+                score=0.8,
+                mask=mask,
+                box=np.asarray([0.1, 0.1, 0.5, 0.5], dtype=np.float32),
+            )
+        ],
+        classifier=FakeClassifier(),
+        class_mapping=mapping,
+        min_confidence=0.5,
+        min_margin=0.05,
+        min_mask_size=4,
+        cluster_iou=0.55,
+        cluster_containment=0.80,
+        context_scale=3.0,
+    )
+
+    assert output[0].label == "side_plate"
+    assert output[0].sign_classifier_accepted is False
+    assert output[0].sign_classifier_fallback_reason == "low_confidence"
+    assert predictions[0]["assigned_label"] == "side_plate"
+
+
 def test_side_orientation_is_recorded_as_its_own_semantic_class():
     script = load_script()
     mask = np.ones((2, 2), dtype=bool)

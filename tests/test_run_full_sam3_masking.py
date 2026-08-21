@@ -68,6 +68,13 @@ def test_short_cli_uses_production_defaults() -> None:
     assert args.vehicle_orientation_min_margin == 0.10
     assert args.vehicle_orientation_nms_iou == 0.80
     assert args.vehicle_prompt_label == "vehicle"
+    assert args.sign_classifier_checkpoint is None
+    assert args.sign_classifier_device == "cpu"
+    assert args.sign_classifier_min_confidence == 0.50
+    assert args.sign_classifier_min_margin == 0.05
+    assert args.sign_classifier_cluster_iou == 0.55
+    assert args.sign_classifier_cluster_containment == 0.80
+    assert args.sign_classifier_context_scale == 3.0
 
 
 def test_sensor_version_is_required() -> None:
@@ -165,6 +172,14 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
             "101",
             "--end-frame",
             "102",
+            "--sign-classifier-checkpoint",
+            "/models/sign_type/model_best.pth",
+            "--sign-classifier-device",
+            "cuda",
+            "--sign-classifier-min-confidence",
+            "0.65",
+            "--sign-classifier-min-margin",
+            "0.12",
         ]
     )
 
@@ -172,6 +187,10 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
     assert captured["cache_visual_features"] is True
     assert captured["colour_correction"] is False
     assert captured["log_json"] is True
+    assert captured["sign_classifier_checkpoint"] == "/models/sign_type/model_best.pth"
+    assert captured["sign_classifier_device"] == "cuda"
+    assert captured["sign_classifier_min_confidence"] == 0.65
+    assert captured["sign_classifier_min_margin"] == 0.12
     assert captured["frame_image_pairs"] == [
         ("000101", (image_dir / "000010.jpg").resolve()),
         ("000102", (image_dir / "000011.jpg").resolve()),

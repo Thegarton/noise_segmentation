@@ -275,6 +275,25 @@ The prediction JSONL includes ensemble, EfficientNet, and numeric probabilities
 for every sample. A neighboring `.metrics.json` contains aggregate test
 metrics.
 
+## Use In The SAM3 Production Runner
+
+Pass the trained checkpoint to the main wrapper:
+
+```bash
+python scripts/run_full_sam3_masking.py \
+  ... \
+  --sign-classifier-checkpoint ./output/sign_type_classifier_ensemble/model_best.pth \
+  --sign-classifier-device cpu \
+  --sign-classifier-min-confidence 0.50 \
+  --sign-classifier-min-margin 0.05
+```
+
+SAM3 still produces the sign masks and six prompt-score inputs. The ensemble
+only selects the final sign class. Accepted `not_a_sign` predictions are
+removed; uncertain predictions keep SAM3 top-1. CPU is the default device so
+the sign classifier does not compete with SAM3 and vehicle EfficientNet for GPU
+memory. Use `--sign-classifier-device cuda` when enough VRAM is available.
+
 ## Feature Analysis Notebook
 
 Open `notebooks/sign_type_feature_analysis.ipynb` after reindexing or merging

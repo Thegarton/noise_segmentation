@@ -615,6 +615,7 @@ def test_builder_smoke_and_resume_without_cuda(tmp_path: Path, monkeypatch: pyte
         str(tmp_path / "sam3.1"),
         "--min-mask-size",
         "1",
+        "--no-geometry-filters",
     ]
     monkeypatch.setattr(sys, "argv", argv)
     builder.main()

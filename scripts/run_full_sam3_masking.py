@@ -196,6 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--time-map",
         "--img-time-map",
+        "--img_time-map",
         dest="time_map",
         required=True,
         help=(
@@ -294,6 +295,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.80,
     )
     parser.add_argument("--sam3-only", action="store_true")
+    parser.add_argument(
+        "--sign-classifier-checkpoint",
+        "--sign-type-classifier-checkpoint",
+        dest="sign_classifier_checkpoint",
+        default=None,
+        help=(
+            "Optional sign_type_classifier model_best.pth. When set, SAM3 sign masks "
+            "are clustered and reclassified before semantic-mask composition."
+        ),
+    )
+    parser.add_argument(
+        "--sign-classifier-device",
+        default="cpu",
+        help="Device for the sign classifier (cpu, cuda, cuda:0, or auto). Default: cpu.",
+    )
+    parser.add_argument("--sign-classifier-min-confidence", type=float, default=0.50)
+    parser.add_argument("--sign-classifier-min-margin", type=float, default=0.05)
+    parser.add_argument("--sign-classifier-cluster-iou", type=float, default=0.55)
+    parser.add_argument(
+        "--sign-classifier-cluster-containment",
+        type=float,
+        default=0.80,
+    )
+    parser.add_argument("--sign-classifier-context-scale", type=float, default=3.0)
 
     parser.add_argument(
         "--gpu-num",
@@ -540,17 +565,27 @@ def write_run_summary_csv(
             "--class-min-consecutive-frames must be positive, "
             f"got {min_consecutive_frames}"
         )
-
     if frame_class_presence is None:
         frame_class_presence = [set(detected_classes)]
-    class_stats = summarize_class_presence(frame_class_presence)
-    filtered_classes = sorted(
-        label
-        for label in detected_classes
-        if class_stats.get(label, {}).get("frame_count", 0) >= min_frames
-        and class_stats.get(label, {}).get("max_consecutive_frames", 0)
-        >= min_consecutive_frames
+    unique_img = (
+        len(deduplicate_matches_by_image(matches))
+        if matches is not None
+        else len(frame_class_presence)
     )
+    class_stats = summarize_class_presence(frame_class_presence)
+    if unique_img >= min_frames:
+        filtered_classes = sorted(
+            label
+            for label in detected_classes
+            if class_stats.get(label, {}).get("frame_count", 0) >= min_frames
+            and class_stats.get(label, {}).get("max_consecutive_frames", 0)
+            >= min_consecutive_frames
+        )
+    else:
+        filtered_classes = sorted(
+            label
+            for label in detected_classes
+        )
 
     data_name = str(args.data_name).strip() if args.data_name is not None else ""
     if not data_name:
@@ -641,6 +676,13 @@ def run_sam3(
         vehicle_orientation_min_margin=args.vehicle_orientation_min_margin,
         vehicle_orientation_nms_iou=args.vehicle_orientation_nms_iou,
         vehicle_prompt_label=args.vehicle_prompt_label,
+        sign_classifier_checkpoint=args.sign_classifier_checkpoint,
+        sign_classifier_device=args.sign_classifier_device,
+        sign_classifier_min_confidence=args.sign_classifier_min_confidence,
+        sign_classifier_min_margin=args.sign_classifier_min_margin,
+        sign_classifier_cluster_iou=args.sign_classifier_cluster_iou,
+        sign_classifier_cluster_containment=args.sign_classifier_cluster_containment,
+        sign_classifier_context_scale=args.sign_classifier_context_scale,
         sam3_only=args.sam3_only,
         prompt_log=args.prompt_log,
         inference_precision=args.inference_precision,
