@@ -61,15 +61,14 @@ def test_short_cli_uses_production_defaults() -> None:
     assert args.overwrite is True
     assert args.log_json is True
     assert args.cache_visual_features is True
-    assert args.colour_correction is False
     assert args.save_intermediate_outputs is False
     assert args.vehicle_orientation_device == "cuda"
     assert args.vehicle_orientation_min_confidence == 0.60
     assert args.vehicle_orientation_min_margin == 0.10
     assert args.vehicle_orientation_nms_iou == 0.80
     assert args.vehicle_prompt_label == "vehicle"
-    assert args.sign_classifier_checkpoint is None
-    assert args.sign_classifier_device == "cpu"
+    assert Path(args.sign_classifier_checkpoint).name == "model_best.pth"
+    assert args.sign_classifier_device == "cuda"
     assert args.sign_classifier_min_confidence == 0.50
     assert args.sign_classifier_min_margin == 0.05
     assert args.sign_classifier_cluster_iou == 0.55
@@ -77,13 +76,14 @@ def test_short_cli_uses_production_defaults() -> None:
     assert args.sign_classifier_context_scale == 3.0
 
 
-def test_sensor_version_is_required() -> None:
+def test_sensor_version_defaults_to_hl320() -> None:
     script = load_script()
     sensor_action = next(
         action for action in script.build_parser()._actions if action.dest == "sensor_version"
     )
 
-    assert sensor_action.required is True
+    assert sensor_action.required is False
+    assert sensor_action.default == "HL320"
 
 
 def test_sensor_config_paths_are_resolved_and_explicit_override_is_kept(tmp_path: Path) -> None:
@@ -185,7 +185,6 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
 
     assert captured["save_outputs"] is False
     assert captured["cache_visual_features"] is True
-    assert captured["colour_correction"] is False
     assert captured["log_json"] is True
     assert captured["sign_classifier_checkpoint"] == "/models/sign_type/model_best.pth"
     assert captured["sign_classifier_device"] == "cuda"
@@ -249,12 +248,10 @@ def test_intermediate_output_flag_is_forwarded_to_sam3(tmp_path: Path, monkeypat
             "--end-frame",
             "101",
             "--save-intermediate-outputs",
-            "--colour-correction",
         ]
     )
 
     assert captured["save_outputs"] is True
-    assert captured["colour_correction"] is True
     assert (output_dir / "000101" / "metadata.json").is_file()
     assert (output_dir / "sam3_run_summary.csv").is_file()
 
@@ -406,11 +403,13 @@ def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -
     assert rows[0]["end_frame"] == "000080"
     assert rows[0]["start_timestamp"] == "1000"
     assert rows[0]["end_timestamp"] == "1000"
+    assert rows[0]["frame_num"] == "1"
     assert rows[1]["tags"] == "环氧地坪(epoxy_floor);front_of_vehicle"
     assert rows[1]["start_frame"] == "000081"
     assert rows[1]["end_frame"] == "000081"
     assert rows[1]["start_timestamp"] == "2000"
     assert rows[1]["end_timestamp"] == "2000"
+    assert rows[1]["frame_num"] == "1"
     assert list(rows[0]) == [
         "tags",
         "data_name",
@@ -418,6 +417,7 @@ def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -
         "end_frame",
         "start_timestamp",
         "end_timestamp",
+        "frame_num",
     ]
 
 
@@ -544,6 +544,7 @@ def test_write_run_summary_csv_segments_lidar_frames_by_camera_image_tags(
             "end_frame": "15",
             "start_timestamp": "1000000",
             "end_timestamp": "1000015",
+            "frame_num": "16",
         },
         {
             "tags": "tag1;tag3",
@@ -552,6 +553,7 @@ def test_write_run_summary_csv_segments_lidar_frames_by_camera_image_tags(
             "end_frame": "30",
             "start_timestamp": "1000016",
             "end_timestamp": "1000030",
+            "frame_num": "15",
         },
         {
             "tags": "tag3;tag4",
@@ -560,6 +562,7 @@ def test_write_run_summary_csv_segments_lidar_frames_by_camera_image_tags(
             "end_frame": "39",
             "start_timestamp": "1000031",
             "end_timestamp": "1000039",
+            "frame_num": "9",
         },
         {
             "tags": "tag5;tag6",
@@ -568,6 +571,7 @@ def test_write_run_summary_csv_segments_lidar_frames_by_camera_image_tags(
             "end_frame": "100",
             "start_timestamp": "1000040",
             "end_timestamp": "1000100",
+            "frame_num": "61",
         },
     ]
 

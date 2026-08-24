@@ -19,8 +19,3 @@ semantic_classes:
   unknown_object: 16
   noise: 17
   ignore: 255
-
-noise_groups:
-  noise:
-    - noise
-

@@ -38,6 +38,16 @@ DEFAULT_VEHICLE_ORIENTATION_CHECKPOINT = (
     / "model_best.pth"
 )
 
+DEFAULT_SIGN_CLASSIFIER_ROOT = Path(
+    os.environ.get("SIGN_CLASSIFIER_ROOT", REPO_ROOT / "sign_type_classifier")
+.expanduser().resolve())
+
+DEFAULT_SIGN_CLASSIFIER_CHECKPOINT = Path(
+    DEFAULT_SIGN_CLASSIFIER_ROOT
+        / "output"
+        / "sign_type_classifier_ensemble_3_augumentad"
+        / "model_best.pth"
+)
 
 def load_csv_class_tags(path: str | Path) -> dict[str, str]:
     config_path = Path(path).expanduser().resolve()
@@ -170,7 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--sensor-version",
-        required=True,
+        default="HL320",
         help="Sensor config directory name under configs/, for example HL320.",
     )
     parser.add_argument(
@@ -272,8 +282,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help=(
-            "Optional sequence-level filtering: retain a class only when it is "
-            "present in at least this many processed camera images. Default: 1."
+            "Write a class to sam3_run_summary.csv only when it is present in at "
+            "least this many processed images."
         ),
     )
     parser.add_argument(
@@ -281,8 +291,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help=(
-            "Optional sequence-level filtering: additionally require this many "
-            "consecutive processed camera images. Default: 1."
+            "Additionally require a class to be present in at least this many "
+            "consecutive processed images."
         ),
     )
 
@@ -302,30 +312,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.80,
     )
     parser.add_argument("--sam3-only", action="store_true")
-    parser.add_argument(
-        "--sign-classifier-checkpoint",
-        "--sign-type-classifier-checkpoint",
-        dest="sign_classifier_checkpoint",
-        default=None,
-        help=(
-            "Optional sign_type_classifier model_best.pth. When set, SAM3 sign masks "
-            "are clustered and reclassified before semantic-mask composition."
-        ),
-    )
-    parser.add_argument(
-        "--sign-classifier-device",
-        default="cpu",
-        help="Device for the sign classifier (cpu, cuda, cuda:0, or auto). Default: cpu.",
-    )
-    parser.add_argument("--sign-classifier-min-confidence", type=float, default=0.50)
-    parser.add_argument("--sign-classifier-min-margin", type=float, default=0.05)
-    parser.add_argument("--sign-classifier-cluster-iou", type=float, default=0.55)
-    parser.add_argument(
-        "--sign-classifier-cluster-containment",
-        type=float,
-        default=0.80,
-    )
-    parser.add_argument("--sign-classifier-context-scale", type=float, default=3.0)
 
     parser.add_argument(
         "--gpu-num",
@@ -351,16 +337,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compute the single-image visual backbone once and reuse it for all text prompts.",
     )
     parser.add_argument(
-        "--colour-correction",
-        "--color-correction",
-        dest="colour_correction",
-        action="store_true",
-        help=(
-            "Apply SimpleWB (P=0.5) and gray-world correction in memory before "
-            "SAM3. Disabled by default; corrected full-frame images are not saved."
-        ),
-    )
-    parser.add_argument(
         "--save-intermediate-outputs",
         action="store_true",
         help=(
@@ -368,6 +344,31 @@ def build_parser() -> argparse.ArgumentParser:
             "By default only sam3_run_summary.csv is written."
         ),
     )
+    parser.add_argument(
+        "--sign-classifier-checkpoint",
+        "--sign-type-classifier-checkpoint",
+        dest="sign_classifier_checkpoint",
+        default=str(DEFAULT_SIGN_CLASSIFIER_CHECKPOINT),
+        help=(
+            "Optional sign_type_classifier model_best.pth. When set, SAM3 sign masks "
+            "are clustered and reclassified before semantic-mask composition."
+        ),
+    )
+    parser.add_argument(
+        "--sign-classifier-device",
+        default="cuda",
+        help="Device for the sign classifier (cpu, cuda, cuda:0, or auto). Default: cpu.",
+    )
+    parser.add_argument("--sign-classifier-min-confidence", type=float, default=0.50)
+    parser.add_argument("--sign-classifier-min-margin", type=float, default=0.05)
+    parser.add_argument("--sign-classifier-cluster-iou", type=float, default=0.55)
+    parser.add_argument(
+        "--sign-classifier-cluster-containment",
+        type=float,
+        default=0.80,
+    )
+    parser.add_argument("--sign-classifier-context-scale", type=float, default=3.0)
+
     return parser
 
 
@@ -676,7 +677,7 @@ def write_run_summary_csv(
 ) -> Path:
     out_dir = Path(args.out_dir).expanduser().resolve()
     if not matches:
-        raise ValueError("Cannot write run summary because no LiDAR frames were selected")
+        raise ValueError("Cannot write run summary because no input frames were selected")
 
     filtered_presence = filter_image_class_presence(
         args,
@@ -707,6 +708,7 @@ def write_run_summary_csv(
                 "end_frame",
                 "start_timestamp",
                 "end_timestamp",
+                "frame_num",
             ],
         )
         writer.writeheader()
@@ -722,6 +724,7 @@ def write_run_summary_csv(
                     "end_frame": segment.matches[-1].frame_id,
                     "start_timestamp": segment.matches[0].frame_timestamp,
                     "end_timestamp": segment.matches[-1].frame_timestamp,
+                    "frame_num": len(segment.matches),
                 }
             )
     temporary_path.replace(summary_path)
@@ -790,7 +793,6 @@ def run_sam3(
         prompt_log=args.prompt_log,
         inference_precision=args.inference_precision,
         cache_visual_features=args.cache_visual_features,
-        colour_correction=args.colour_correction,
         save_outputs=args.save_intermediate_outputs,
         frame_image_pairs=None
         if matches is None
