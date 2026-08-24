@@ -196,10 +196,16 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
     ]
     assert [path.name for path in output_dir.iterdir()] == ["sam3_run_summary.csv"]
     with (output_dir / "sam3_run_summary.csv").open(encoding="utf-8", newline="") as stream:
-        row = next(csv.DictReader(stream))
-    assert row["tags"] == "锥桶(traffic_cone)"
-    assert row["start_frame"] == "000101"
-    assert row["end_frame"] == "000102"
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 2
+    assert rows[0]["tags"] == "锥桶(traffic_cone)"
+    assert rows[0]["start_frame"] == "000101"
+    assert rows[0]["end_frame"] == "000101"
+    assert rows[0]["frame_num"] == "1"
+    assert rows[1]["tags"] == "锥桶(traffic_cone)"
+    assert rows[1]["start_frame"] == "000102"
+    assert rows[1]["end_frame"] == "000102"
+    assert rows[1]["frame_num"] == "1"
 
 
 def test_intermediate_output_flag_is_forwarded_to_sam3(tmp_path: Path, monkeypatch) -> None:
@@ -463,12 +469,19 @@ def test_write_run_summary_csv_filters_by_count_and_consecutive_frames(tmp_path:
     with summary_path.open(encoding="utf-8", newline="") as stream:
         rows = list(csv.DictReader(stream))
 
-    assert rows[0]["tags"] == "consecutive"
-    assert rows[0]["start_frame"] == "000000"
-    assert rows[0]["end_frame"] == "000002"
-    assert rows[1]["tags"] == ""
-    assert rows[1]["start_frame"] == "000003"
-    assert rows[1]["end_frame"] == "000004"
+    assert len(rows) == 5
+    assert [row["tags"] for row in rows] == [
+        "consecutive",
+        "consecutive",
+        "consecutive",
+        "",
+        "",
+    ]
+    for frame_id, row in enumerate(rows):
+        expected_frame = f"{frame_id:06d}"
+        assert row["start_frame"] == expected_frame
+        assert row["end_frame"] == expected_frame
+        assert row["frame_num"] == "1"
 
 
 def test_write_run_summary_csv_segments_lidar_frames_by_camera_image_tags(
@@ -574,6 +587,72 @@ def test_write_run_summary_csv_segments_lidar_frames_by_camera_image_tags(
             "frame_num": "61",
         },
     ]
+
+
+def test_write_run_summary_csv_keeps_one_row_per_lidar_frame_for_unique_images(
+    tmp_path: Path,
+) -> None:
+    script = load_script()
+    tags_yaml = tmp_path / "tags.yaml"
+    tags_yaml.write_text(
+        "class_tags:\n"
+        "  epoxy_floor: epoxy_floor\n"
+        "  underground_sign: underground_sign\n",
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        out_dir=str(tmp_path),
+        image_dir=str(tmp_path),
+        data_name="one_to_one",
+        csv_tags_yaml=str(tags_yaml),
+        class_min_frames=1,
+        class_min_consecutive_frames=1,
+    )
+    frame_ids = ["000532", "000533", "000534", "000535", "000536"]
+    image_names = ["000837", "000840", "000843", "000846", "000849"]
+    timestamps = [
+        1786762560668759,
+        1786762560768866,
+        1786762560866308,
+        1786762560967995,
+        1786762561062330,
+    ]
+    matches = [
+        script.MatchedFrame(
+            frame_id=frame_id,
+            image_path=tmp_path / f"{image_name}.jpg",
+            image_reference=image_name,
+            image_name=image_name,
+            frame_timestamp=timestamp,
+            diff_ms=0.0,
+        )
+        for frame_id, image_name, timestamp in zip(
+            frame_ids,
+            image_names,
+            timestamps,
+        )
+    ]
+    classes = frozenset({"epoxy_floor", "underground_sign"})
+
+    summary_path = script.write_run_summary_csv(
+        args,
+        image_class_presence={image_name: classes for image_name in image_names},
+        matches=matches,
+    )
+
+    with summary_path.open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 5
+    for row, frame_id, timestamp in zip(rows, frame_ids, timestamps):
+        assert row == {
+            "tags": "epoxy_floor;underground_sign",
+            "data_name": "one_to_one",
+            "start_frame": frame_id,
+            "end_frame": frame_id,
+            "start_timestamp": str(timestamp),
+            "end_timestamp": str(timestamp),
+            "frame_num": "1",
+        }
 
 
 def load_script():

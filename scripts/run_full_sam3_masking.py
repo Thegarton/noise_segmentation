@@ -603,6 +603,9 @@ def build_tag_segments(
     numeric_frame_ids = [int(match.frame_id) for match in ordered_matches]
     if len(set(numeric_frame_ids)) != len(numeric_frame_ids):
         raise ValueError("Matched LiDAR frame ids must be unique")
+    one_image_per_lidar_frame = (
+        len({match.image_name for match in ordered_matches}) == len(ordered_matches)
+    )
 
     segments: list[TagSegment] = []
     segment_matches: list[MatchedFrame] = []
@@ -615,7 +618,8 @@ def build_tag_segments(
             )
         classes = image_class_presence[match.image_name]
         continues_segment = (
-            segment_classes == classes
+            not one_image_per_lidar_frame
+            and segment_classes == classes
             and previous_frame_id is not None
             and numeric_frame_id == previous_frame_id + 1
         )
