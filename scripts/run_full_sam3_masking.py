@@ -86,7 +86,7 @@ def load_csv_class_tags(path: str | Path) -> dict[str, str]:
 
 
 def format_csv_tags(classes: list[str], *, class_tags: dict[str, str]) -> str:
-    return "; ".join(class_tags.get(label, label) for label in classes)
+    return ";".join(class_tags.get(label, label) for label in classes)
 
 
 def find_sensor_config_dir(
@@ -156,6 +156,13 @@ class MatchedFrame:
     image_name: str
     frame_timestamp: int
     diff_ms: float
+
+
+@dataclass(frozen=True)
+class TagSegment:
+    classes: frozenset[str]
+    matches: tuple[MatchedFrame, ...]
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -263,19 +270,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--class-min-frames",
         type=int,
-        default=2,
+        default=1,
         help=(
-            "Write a class to sam3_run_summary.csv only when it is present in at "
-            "least this many processed images."
+            "Optional sequence-level filtering: retain a class only when it is "
+            "present in at least this many processed camera images. Default: 1."
         ),
     )
     parser.add_argument(
         "--class-min-consecutive-frames",
         type=int,
-        default=2,
+        default=1,
         help=(
-            "Additionally require a class to be present in at least this many "
-            "consecutive processed images."
+            "Optional sequence-level filtering: additionally require this many "
+            "consecutive processed camera images. Default: 1."
         ),
     )
 
@@ -533,29 +540,12 @@ def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame] | Non
     )
 
 
-def write_run_summary_csv(
+def filter_image_class_presence(
     args: argparse.Namespace,
     *,
-    detected_classes: set[str],
-    frame_class_presence: tuple[frozenset[str], ...] | list[set[str]] | None = None,
-    matches: list[MatchedFrame] | None,
-) -> Path:
-    out_dir = Path(args.out_dir).expanduser().resolve()
-    if matches is not None:
-        frame_ids = [match.frame_id for match in matches]
-        start_timestamp: int | str = matches[0].frame_timestamp
-        end_timestamp: int | str = matches[-1].frame_timestamp
-    else:
-        image_paths = collect_images(
-            Path(args.image_dir).expanduser().resolve(),
-            recursive=False,
-        )
-        frame_ids = [image_path.stem for image_path in image_paths]
-        start_timestamp = ""
-        end_timestamp = ""
-    if not frame_ids:
-        raise ValueError("Cannot write run summary because no input frames were selected")
-
+    matches: list[MatchedFrame],
+    image_class_presence: dict[str, frozenset[str]],
+) -> dict[str, frozenset[str]]:
     min_frames = int(getattr(args, "class_min_frames", 1))
     min_consecutive_frames = int(getattr(args, "class_min_consecutive_frames", 1))
     if min_frames <= 0:
@@ -565,27 +555,138 @@ def write_run_summary_csv(
             "--class-min-consecutive-frames must be positive, "
             f"got {min_consecutive_frames}"
         )
-    if frame_class_presence is None:
-        frame_class_presence = [set(detected_classes)]
-    unique_img = (
-        len(deduplicate_matches_by_image(matches))
-        if matches is not None
-        else len(frame_class_presence)
+    unique_matches = deduplicate_matches_by_image(matches)
+    missing_images = sorted(
+        {match.image_name for match in unique_matches} - set(image_class_presence)
     )
+    if missing_images:
+        raise ValueError(
+            "SAM3 returned no class-presence result for camera images: "
+            f"{missing_images}"
+        )
+    frame_class_presence = [
+        image_class_presence[match.image_name]
+        for match in unique_matches
+    ]
+    detected_classes = {
+        label
+        for frame_classes in frame_class_presence
+        for label in frame_classes
+    }
     class_stats = summarize_class_presence(frame_class_presence)
-    if unique_img >= min_frames:
-        filtered_classes = sorted(
+    if len(unique_matches) >= min_frames:
+        retained_classes = {
             label
             for label in detected_classes
             if class_stats.get(label, {}).get("frame_count", 0) >= min_frames
             and class_stats.get(label, {}).get("max_consecutive_frames", 0)
             >= min_consecutive_frames
-        )
+        }
     else:
-        filtered_classes = sorted(
-            label
-            for label in detected_classes
+        retained_classes = detected_classes
+    return {
+        image_name: frozenset(classes & retained_classes)
+        for image_name, classes in image_class_presence.items()
+    }
+
+
+def build_tag_segments(
+    matches: list[MatchedFrame],
+    *,
+    image_class_presence: dict[str, frozenset[str]],
+) -> list[TagSegment]:
+    if not matches:
+        raise ValueError("Cannot build tag segments because no LiDAR frames were selected")
+
+    ordered_matches = sorted(matches, key=lambda match: int(match.frame_id))
+    numeric_frame_ids = [int(match.frame_id) for match in ordered_matches]
+    if len(set(numeric_frame_ids)) != len(numeric_frame_ids):
+        raise ValueError("Matched LiDAR frame ids must be unique")
+
+    segments: list[TagSegment] = []
+    segment_matches: list[MatchedFrame] = []
+    segment_classes: frozenset[str] | None = None
+    previous_frame_id: int | None = None
+    for match, numeric_frame_id in zip(ordered_matches, numeric_frame_ids):
+        if match.image_name not in image_class_presence:
+            raise ValueError(
+                f"Camera image {match.image_name!r} has no SAM3 class-presence result"
+            )
+        classes = image_class_presence[match.image_name]
+        continues_segment = (
+            segment_classes == classes
+            and previous_frame_id is not None
+            and numeric_frame_id == previous_frame_id + 1
         )
+        if segment_matches and not continues_segment:
+            assert segment_classes is not None
+            segments.append(
+                TagSegment(
+                    classes=segment_classes,
+                    matches=tuple(segment_matches),
+                )
+            )
+            segment_matches = []
+        if not segment_matches:
+            segment_classes = classes
+        segment_matches.append(match)
+        previous_frame_id = numeric_frame_id
+
+    assert segment_classes is not None
+    segments.append(
+        TagSegment(
+            classes=segment_classes,
+            matches=tuple(segment_matches),
+        )
+    )
+    return segments
+
+
+def image_class_presence_from_summary(
+    processing_matches: list[MatchedFrame],
+    detection_summary: FolderDetectionSummary,
+) -> dict[str, frozenset[str]]:
+    if len(processing_matches) != len(detection_summary.frame_class_presence):
+        raise ValueError(
+            "SAM3 result count does not match processed camera images: "
+            f"images={len(processing_matches)}, "
+            f"results={len(detection_summary.frame_class_presence)}"
+        )
+    expected_frame_ids = tuple(match.frame_id for match in processing_matches)
+    if detection_summary.frame_ids != expected_frame_ids:
+        raise ValueError(
+            "SAM3 result order does not match processed camera images: "
+            f"expected frame ids={expected_frame_ids}, "
+            f"got={detection_summary.frame_ids}"
+        )
+    return {
+        match.image_name: frozenset(classes)
+        for match, classes in zip(
+            processing_matches,
+            detection_summary.frame_class_presence,
+        )
+    }
+
+
+def write_run_summary_csv(
+    args: argparse.Namespace,
+    *,
+    image_class_presence: dict[str, frozenset[str]],
+    matches: list[MatchedFrame],
+) -> Path:
+    out_dir = Path(args.out_dir).expanduser().resolve()
+    if not matches:
+        raise ValueError("Cannot write run summary because no LiDAR frames were selected")
+
+    filtered_presence = filter_image_class_presence(
+        args,
+        matches=matches,
+        image_class_presence=image_class_presence,
+    )
+    segments = build_tag_segments(
+        matches,
+        image_class_presence=filtered_presence,
+    )
 
     data_name = str(args.data_name).strip() if args.data_name is not None else ""
     if not data_name:
@@ -606,21 +707,23 @@ def write_run_summary_csv(
                 "end_frame",
                 "start_timestamp",
                 "end_timestamp",
-                "frame_num",
             ],
         )
         writer.writeheader()
-        writer.writerow(
-            {
-                "tags": format_csv_tags(filtered_classes, class_tags=class_tags),
-                "data_name": data_name,
-                "start_frame": frame_ids[0],
-                "end_frame": frame_ids[-1],
-                "start_timestamp": start_timestamp,
-                "end_timestamp": end_timestamp,
-                "frame_num": len(frame_ids),
-            }
-        )
+        for segment in segments:
+            writer.writerow(
+                {
+                    "tags": format_csv_tags(
+                        sorted(segment.classes),
+                        class_tags=class_tags,
+                    ),
+                    "data_name": data_name,
+                    "start_frame": segment.matches[0].frame_id,
+                    "end_frame": segment.matches[-1].frame_id,
+                    "start_timestamp": segment.matches[0].frame_timestamp,
+                    "end_timestamp": segment.matches[-1].frame_timestamp,
+                }
+            )
     temporary_path.replace(summary_path)
     return summary_path
 
@@ -759,6 +862,10 @@ def main(argv: list[str] | None = None) -> None:
         )
     )
     detection_summary = run_sam3(args, matches=processing_matches)
+    image_class_presence = image_class_presence_from_summary(
+        processing_matches,
+        detection_summary,
+    )
     if not args.save_intermediate_outputs:
         prepare_csv_only_output(
             args.out_dir,
@@ -767,8 +874,7 @@ def main(argv: list[str] | None = None) -> None:
         )
     summary_path = write_run_summary_csv(
         args,
-        detected_classes=set(detection_summary.detected_classes),
-        frame_class_presence=detection_summary.frame_class_presence,
+        image_class_presence=image_class_presence,
         matches=matches,
     )
     print(json.dumps({"run_summary": str(summary_path)}, indent=2))

@@ -55,8 +55,8 @@ def test_short_cli_uses_production_defaults() -> None:
     assert Path(args.sensor_config_dir).name.strip() == "HL320"
     assert Path(args.vehicle_orientation_checkpoint).name == "model_best.pth"
     assert args.min_score == 0.60
-    assert args.class_min_frames == 2
-    assert args.class_min_consecutive_frames == 2
+    assert args.class_min_frames == 1
+    assert args.class_min_consecutive_frames == 1
     assert args.min_mask_size == 500
     assert args.overwrite is True
     assert args.log_json is True
@@ -390,35 +390,34 @@ def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -
 
     summary_path = script.write_run_summary_csv(
         args,
-        detected_classes={"ground_markings", "front_of_vehicle", "epoxy_floor"},
-        frame_class_presence=[
-            {"ground_markings", "front_of_vehicle"},
-            {"front_of_vehicle", "epoxy_floor"},
-        ],
+        image_class_presence={
+            "000000": frozenset({"ground_markings", "front_of_vehicle"}),
+            "000001": frozenset({"front_of_vehicle", "epoxy_floor"}),
+        },
         matches=matches,
     )
 
     with summary_path.open(encoding="utf-8", newline="") as stream:
-        row = next(csv.DictReader(stream))
-    assert row["tags"] == (
-        "环氧地坪(epoxy_floor); "
-        "front_of_vehicle; "
-        "地面标识(ground_markings)"
-    )
-    assert row["data_name"] == "data_name"
-    assert row["start_frame"] == "000080"
-    assert row["end_frame"] == "000081"
-    assert row["start_timestamp"] == "1000"
-    assert row["end_timestamp"] == "2000"
-    assert row["frame_num"] == "2"
-    assert list(row) == [
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 2
+    assert rows[0]["tags"] == "front_of_vehicle;地面标识(ground_markings)"
+    assert rows[0]["data_name"] == "data_name"
+    assert rows[0]["start_frame"] == "000080"
+    assert rows[0]["end_frame"] == "000080"
+    assert rows[0]["start_timestamp"] == "1000"
+    assert rows[0]["end_timestamp"] == "1000"
+    assert rows[1]["tags"] == "环氧地坪(epoxy_floor);front_of_vehicle"
+    assert rows[1]["start_frame"] == "000081"
+    assert rows[1]["end_frame"] == "000081"
+    assert rows[1]["start_timestamp"] == "2000"
+    assert rows[1]["end_timestamp"] == "2000"
+    assert list(rows[0]) == [
         "tags",
         "data_name",
         "start_frame",
         "end_frame",
         "start_timestamp",
         "end_timestamp",
-        "frame_num",
     ]
 
 
@@ -441,17 +440,136 @@ def test_write_run_summary_csv_filters_by_count_and_consecutive_frames(tmp_path:
         set(),
         {"scattered"},
     ]
+    matches = [
+        script.MatchedFrame(
+            frame_id=f"{frame_id:06d}",
+            image_path=tmp_path / f"{frame_id:06d}.jpg",
+            image_reference=f"{frame_id:06d}",
+            image_name=f"{frame_id:06d}",
+            frame_timestamp=1000 + frame_id,
+            diff_ms=0.0,
+        )
+        for frame_id in range(5)
+    ]
     summary_path = script.write_run_summary_csv(
         args,
-        detected_classes={"consecutive", "scattered", "too_rare"},
-        frame_class_presence=frame_class_presence,
-        matches=None,
+        image_class_presence={
+            match.image_name: frozenset(classes)
+            for match, classes in zip(matches, frame_class_presence)
+        },
+        matches=matches,
     )
 
     with summary_path.open(encoding="utf-8", newline="") as stream:
-        row = next(csv.DictReader(stream))
+        rows = list(csv.DictReader(stream))
 
-    assert row["tags"] == "consecutive"
+    assert rows[0]["tags"] == "consecutive"
+    assert rows[0]["start_frame"] == "000000"
+    assert rows[0]["end_frame"] == "000002"
+    assert rows[1]["tags"] == ""
+    assert rows[1]["start_frame"] == "000003"
+    assert rows[1]["end_frame"] == "000004"
+
+
+def test_write_run_summary_csv_segments_lidar_frames_by_camera_image_tags(
+    tmp_path: Path,
+) -> None:
+    script = load_script()
+    tags_yaml = tmp_path / "tags.yaml"
+    tags_yaml.write_text(
+        "class_tags:\n"
+        "  tag1: tag1\n"
+        "  tag2: tag2\n"
+        "  tag3: tag3\n"
+        "  tag4: tag4\n"
+        "  tag5: tag5\n"
+        "  tag6: tag6\n",
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        out_dir=str(tmp_path),
+        image_dir=str(tmp_path),
+        data_name="example_data",
+        csv_tags_yaml=str(tags_yaml),
+        class_min_frames=1,
+        class_min_consecutive_frames=1,
+    )
+    image_for_frame = {}
+    for frame_id in range(101):
+        if frame_id <= 9:
+            image_for_frame[frame_id] = "00027"
+        elif frame_id <= 15:
+            image_for_frame[frame_id] = "00045"
+        elif frame_id <= 30:
+            image_for_frame[frame_id] = "00053"
+        elif frame_id <= 39:
+            image_for_frame[frame_id] = "00057"
+        elif frame_id <= 99:
+            image_for_frame[frame_id] = "00060"
+        else:
+            image_for_frame[frame_id] = "00080"
+    matches = [
+        script.MatchedFrame(
+            frame_id=str(frame_id),
+            image_path=tmp_path / f"{image_for_frame[frame_id]}.jpg",
+            image_reference=image_for_frame[frame_id],
+            image_name=image_for_frame[frame_id],
+            frame_timestamp=1_000_000 + frame_id,
+            diff_ms=0.0,
+        )
+        for frame_id in range(101)
+    ]
+    image_class_presence = {
+        "00027": frozenset({"tag1", "tag2"}),
+        "00045": frozenset({"tag1", "tag2"}),
+        "00053": frozenset({"tag1", "tag3"}),
+        "00057": frozenset({"tag3", "tag4"}),
+        "00060": frozenset({"tag5", "tag6"}),
+        "00080": frozenset({"tag5", "tag6"}),
+    }
+
+    summary_path = script.write_run_summary_csv(
+        args,
+        image_class_presence=image_class_presence,
+        matches=matches,
+    )
+
+    with summary_path.open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert rows == [
+        {
+            "tags": "tag1;tag2",
+            "data_name": "example_data",
+            "start_frame": "0",
+            "end_frame": "15",
+            "start_timestamp": "1000000",
+            "end_timestamp": "1000015",
+        },
+        {
+            "tags": "tag1;tag3",
+            "data_name": "example_data",
+            "start_frame": "16",
+            "end_frame": "30",
+            "start_timestamp": "1000016",
+            "end_timestamp": "1000030",
+        },
+        {
+            "tags": "tag3;tag4",
+            "data_name": "example_data",
+            "start_frame": "31",
+            "end_frame": "39",
+            "start_timestamp": "1000031",
+            "end_timestamp": "1000039",
+        },
+        {
+            "tags": "tag5;tag6",
+            "data_name": "example_data",
+            "start_frame": "40",
+            "end_frame": "100",
+            "start_timestamp": "1000040",
+            "end_timestamp": "1000100",
+        },
+    ]
 
 
 def load_script():
