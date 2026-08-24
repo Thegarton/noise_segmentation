@@ -280,6 +280,26 @@ def test_load_csv_class_tags_reads_mapping(tmp_path: Path) -> None:
     }
 
 
+def test_sensor_csv_tags_map_sign_classifier_output() -> None:
+    script = load_script()
+    config = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "\u00a0HL320"
+        / "sam3_csv_class_tags_zh_en.yaml"
+    )
+
+    tags = script.load_csv_class_tags(config)
+
+    assert script.format_csv_tags(
+        ["epoxy_floor", "height_restriction_sign_at_underground"],
+        class_tags=tags,
+    ) == (
+        "环氧地坪(epoxy_floor);"
+        "地库出入口限高路牌(height_restriction_sign_at_underground)"
+    )
+
+
 def test_load_matched_frames_selects_minimum_absolute_diff_for_each_frame(tmp_path: Path) -> None:
     script = load_script()
     image_dir = tmp_path / "images"
