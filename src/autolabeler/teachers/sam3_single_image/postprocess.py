@@ -12,7 +12,17 @@ import numpy as np
 from .runtime import validate_probability
 from .types import SIGN_TYPE_LABELS, SIGN_TYPE_REJECT_LABEL, Sam3Instance
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+
+def find_project_root(module_path: str | Path = __file__) -> Path:
+    """Find the checkout root for both supported package layouts."""
+    resolved = Path(module_path).expanduser().resolve()
+    for parent in resolved.parents:
+        if (parent / "src" / "autolabeler").is_dir():
+            return parent
+    return Path.cwd().resolve()
+
+
+REPO_ROOT = find_project_root()
 
 CLASS_OVERRIDES = {
     "ground_markings": {"epoxy_floor"},
@@ -376,8 +386,10 @@ def build_vehicle_orientation_classifier(
         from vehicle_orientation.model import VehicleOrientationClassifier  # type: ignore # noqa: WPS433
     except ImportError as exc:
         raise ImportError(
-            "Vehicle orientation support is not installed. Run: "
-            "pip install -e vehicle_orientation inside the SAM3 environment."
+            "Vehicle orientation support could not be imported. "
+            f"project_root={REPO_ROOT}, local_src={local_src}. "
+            "Install it with 'pip install -e vehicle_orientation' inside the "
+            "SAM3 environment if the local source directory is absent."
         ) from exc
     return VehicleOrientationClassifier(checkpoint_path, device=device)
 
@@ -391,8 +403,10 @@ def build_sign_type_classifier(checkpoint_path: str | Path, *, device: str) -> A
         from sign_type_classifier.model import SignTypeEnsembleClassifier  # type: ignore # noqa: WPS433
     except ImportError as exc:
         raise ImportError(
-            "Sign-type classifier support is not installed. Run: "
-            "pip install -e sign_type_classifier inside the SAM3 environment."
+            "Sign-type classifier support could not be imported. "
+            f"project_root={REPO_ROOT}, local_src={local_src}. "
+            "Install it with 'pip install -e sign_type_classifier' inside the "
+            "SAM3 environment if the local source directory is absent."
         ) from exc
 
     classifier = SignTypeEnsembleClassifier(checkpoint_path, device=device)

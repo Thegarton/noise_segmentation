@@ -27,10 +27,13 @@ SENSOR_CONFIG_FILENAMES = {
     "label_min_scores": "sam3_label_min_scores.yaml",
     "csv_tags_yaml": "sam3_csv_class_tags_zh_en.yaml",
 }
+REQUIRED_SENSOR_CONFIG_ATTRIBUTES = frozenset({"prompt_config", "classes_yaml"})
 DEFAULT_SAM3_ROOT = (REPO_ROOT / "../.." / "sam3").resolve()
-DEFAULT_VEHICLE_ORIENTATION_ROOT = Path(
-    os.environ.get("VEHICLE_ORIENTATION_ROOT", REPO_ROOT / "vehicle_orientation")
-).expanduser().resolve()
+DEFAULT_VEHICLE_ORIENTATION_ROOT = (
+    Path(os.environ.get("VEHICLE_ORIENTATION_ROOT", REPO_ROOT / "vehicle_orientation"))
+    .expanduser()
+    .resolve()
+)
 DEFAULT_VEHICLE_ORIENTATION_CHECKPOINT = (
     DEFAULT_VEHICLE_ORIENTATION_ROOT
     / "output"
@@ -40,14 +43,17 @@ DEFAULT_VEHICLE_ORIENTATION_CHECKPOINT = (
 
 DEFAULT_SIGN_CLASSIFIER_ROOT = Path(
     os.environ.get("SIGN_CLASSIFIER_ROOT", REPO_ROOT / "sign_type_classifier")
-.expanduser().resolve())
+    .expanduser()
+    .resolve()
+)
 
 DEFAULT_SIGN_CLASSIFIER_CHECKPOINT = Path(
     DEFAULT_SIGN_CLASSIFIER_ROOT
-        / "output"
-        / "sign_type_classifier_ensemble_3_augumentad"
-        / "model_best.pth"
+    / "output"
+    / "sign_type_classifier_ensemble_3_augumentad"
+    / "model_best.pth"
 )
+
 
 def load_csv_class_tags(path: str | Path) -> dict[str, str]:
     config_path = Path(path).expanduser().resolve()
@@ -149,10 +155,18 @@ def resolve_sensor_config_paths(
             else sensor_dir / filename
         )
         if not config_path.is_file():
-            source = f"explicit --{attribute.replace('_', '-')}" if explicit_path else args.sensor_version
-            raise FileNotFoundError(
-                f"Missing {attribute.replace('_', ' ')} config for {source}: {config_path}"
-            )
+            if explicit_path or attribute in REQUIRED_SENSOR_CONFIG_ATTRIBUTES:
+                source = (
+                    f"explicit --{attribute.replace('_', '-')}"
+                    if explicit_path
+                    else args.sensor_version
+                )
+                raise FileNotFoundError(
+                    f"Missing {attribute.replace('_', ' ')} config for "
+                    f"{source}: {config_path}"
+                )
+            setattr(args, attribute, None)
+            continue
         setattr(args, attribute, str(config_path))
     args.sensor_config_dir = str(sensor_dir)
     return args
@@ -164,8 +178,9 @@ class MatchedFrame:
     image_path: Path
     image_reference: str
     image_name: str
-    frame_timestamp: int
+    frame_timestamp: int | None
     diff_ms: float
+    sequence_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -215,16 +230,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--img-time-map",
         "--img_time-map",
         dest="time_map",
-        required=True,
+        default=None,
         help=(
+            "Optional synchronized-LiDAR mode input. "
             "TXT with '<lidar-frame>>><lidar-timestamp>>><...>>><...>' rows. "
-            "The second column is written to the summary CSV."
+            "The second column is written to the summary CSV. Omit together with "
+            "--img-match, --start-frame and --end-frame to process every image."
         ),
     )
     parser.add_argument(
         "--img-match",
-        required=True,
+        default=None,
         help=(
+            "Optional synchronized-LiDAR mode input. "
             "TXT with '<lidar-frame>>><image-name>>><diff-ms>' rows. For each frame, "
             "the image with the smallest absolute time difference is selected."
         ),
@@ -232,13 +250,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--start-frame",
         type=int,
-        required=True,
+        default=None,
         help="First LiDAR frame id from the first --img-match column (inclusive).",
     )
     parser.add_argument(
         "--end-frame",
         type=int,
-        required=True,
+        default=None,
         help="Last LiDAR frame id from the first --img-match column (inclusive).",
     )
     parser.add_argument(
@@ -302,7 +320,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--vehicle-prompt-label", default="vehicle")
     parser.add_argument("--vehicle-orientation-device", default="cuda")
-    parser.add_argument("--vehicle-orientation-min-confidence", type=float, default=0.60)
+    parser.add_argument(
+        "--vehicle-orientation-min-confidence", type=float, default=0.60
+    )
     parser.add_argument("--vehicle-orientation-min-margin", type=float, default=0.10)
     parser.add_argument(
         "--mask-nms-iou",
@@ -391,7 +411,9 @@ def parse_delimited_rows(
         raise FileNotFoundError(f"Mapping file does not exist: {source}")
 
     rows: list[list[str]] = []
-    for line_number, raw_line in enumerate(source.read_text(encoding="utf-8-sig").splitlines(), start=1):
+    for line_number, raw_line in enumerate(
+        source.read_text(encoding="utf-8-sig").splitlines(), start=1
+    ):
         line = raw_line.strip()
         values = [value.strip() for value in line.split(">>")]
         allowed_columns = (columns,) if isinstance(columns, int) else columns
@@ -417,6 +439,48 @@ def index_images(image_dir: Path, *, recursive: bool = False) -> dict[str, Path]
             )
         by_stem[image_path.stem] = image_path
     return by_stem
+
+
+def load_image_frames(
+    image_dir: str | Path,
+    *,
+    recursive: bool = False,
+) -> list[MatchedFrame]:
+    """Build frame records directly from an image folder without LiDAR metadata."""
+    source_dir = Path(image_dir).expanduser().resolve()
+    images_by_stem = index_images(source_dir, recursive=recursive)
+    if not images_by_stem:
+        raise ValueError(f"No supported images found in {source_dir}")
+    return [
+        MatchedFrame(
+            frame_id=image_path.stem,
+            image_path=image_path,
+            image_reference=image_path.stem,
+            image_name=image_path.stem,
+            frame_timestamp=None,
+            diff_ms=0.0,
+            sequence_index=index,
+        )
+        for index, image_path in enumerate(images_by_stem.values())
+    ]
+
+
+def matched_frame_order(match: MatchedFrame) -> tuple[int, int, str]:
+    if match.sequence_index is not None:
+        return 0, int(match.sequence_index), match.frame_id
+    try:
+        return 1, int(match.frame_id), match.frame_id
+    except ValueError:
+        return 2, 0, match.frame_id
+
+
+def matched_frame_sequence(match: MatchedFrame) -> int | None:
+    if match.sequence_index is not None:
+        return int(match.sequence_index)
+    try:
+        return int(match.frame_id)
+    except ValueError:
+        return None
 
 
 def load_matched_frames(
@@ -497,11 +561,19 @@ def load_matched_frames(
         candidate_key = (abs(diff_ms), row_index)
         previous = best_by_frame.get(numeric_frame_id)
         if previous is None or candidate_key < previous[:2]:
-            best_by_frame[numeric_frame_id] = (candidate_key[0], candidate_key[1], candidate)
+            best_by_frame[numeric_frame_id] = (
+                candidate_key[0],
+                candidate_key[1],
+                candidate,
+            )
 
     if not best_by_frame:
-        range_description = f"[{start_frame or 0}, {end_frame if end_frame is not None else 'end'}]"
-        raise ValueError(f"No matched frames selected from {img_match} in range {range_description}")
+        range_description = (
+            f"[{start_frame or 0}, {end_frame if end_frame is not None else 'end'}]"
+        )
+        raise ValueError(
+            f"No matched frames selected from {img_match} in range {range_description}"
+        )
     return [best_by_frame[frame_id][2] for frame_id in sorted(best_by_frame)]
 
 
@@ -519,18 +591,20 @@ def deduplicate_matches_by_image(matches: list[MatchedFrame]) -> list[MatchedFra
             )
     return sorted(
         (entry[2] for entry in best_by_image.values()),
-        key=lambda match: int(match.frame_id),
+        key=matched_frame_order,
     )
 
 
-def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame] | None:
+def selected_frame_matches(args: argparse.Namespace) -> list[MatchedFrame]:
     mapping_values = (args.time_map, args.img_match)
     if any(mapping_values) and not all(mapping_values):
         raise ValueError("--time-map and --img-match must be provided together")
     if not all(mapping_values):
         if args.start_frame is not None or args.end_frame is not None:
-            raise ValueError("--start-frame/--end-frame require --time-map and --img-match")
-        return None
+            raise ValueError(
+                "--start-frame/--end-frame require --time-map and --img-match"
+            )
+        return load_image_frames(args.image_dir, recursive=False)
     return load_matched_frames(
         image_dir=args.image_dir,
         time_map=args.time_map,
@@ -566,13 +640,10 @@ def filter_image_class_presence(
             f"{missing_images}"
         )
     frame_class_presence = [
-        image_class_presence[match.image_name]
-        for match in unique_matches
+        image_class_presence[match.image_name] for match in unique_matches
     ]
     detected_classes = {
-        label
-        for frame_classes in frame_class_presence
-        for label in frame_classes
+        label for frame_classes in frame_class_presence for label in frame_classes
     }
     class_stats = summarize_class_presence(frame_class_presence)
     if len(unique_matches) >= min_frames:
@@ -597,31 +668,33 @@ def build_tag_segments(
     image_class_presence: dict[str, frozenset[str]],
 ) -> list[TagSegment]:
     if not matches:
-        raise ValueError("Cannot build tag segments because no LiDAR frames were selected")
+        raise ValueError("Cannot build tag segments because no frames were selected")
 
-    ordered_matches = sorted(matches, key=lambda match: int(match.frame_id))
-    numeric_frame_ids = [int(match.frame_id) for match in ordered_matches]
-    if len(set(numeric_frame_ids)) != len(numeric_frame_ids):
-        raise ValueError("Matched LiDAR frame ids must be unique")
-    one_image_per_lidar_frame = (
-        len({match.image_name for match in ordered_matches}) == len(ordered_matches)
+    ordered_matches = sorted(matches, key=matched_frame_order)
+    frame_ids = [match.frame_id for match in ordered_matches]
+    if len(set(frame_ids)) != len(frame_ids):
+        raise ValueError("Matched frame ids must be unique")
+    one_image_per_frame = len({match.image_name for match in ordered_matches}) == len(
+        ordered_matches
     )
 
     segments: list[TagSegment] = []
     segment_matches: list[MatchedFrame] = []
     segment_classes: frozenset[str] | None = None
-    previous_frame_id: int | None = None
-    for match, numeric_frame_id in zip(ordered_matches, numeric_frame_ids):
+    previous_sequence: int | None = None
+    for match in ordered_matches:
         if match.image_name not in image_class_presence:
             raise ValueError(
                 f"Camera image {match.image_name!r} has no SAM3 class-presence result"
             )
         classes = image_class_presence[match.image_name]
+        sequence = matched_frame_sequence(match)
         continues_segment = (
-            not one_image_per_lidar_frame
+            not one_image_per_frame
             and segment_classes == classes
-            and previous_frame_id is not None
-            and numeric_frame_id == previous_frame_id + 1
+            and previous_sequence is not None
+            and sequence is not None
+            and sequence == previous_sequence + 1
         )
         if segment_matches and not continues_segment:
             assert segment_classes is not None
@@ -635,7 +708,7 @@ def build_tag_segments(
         if not segment_matches:
             segment_classes = classes
         segment_matches.append(match)
-        previous_frame_id = numeric_frame_id
+        previous_sequence = sequence
 
     assert segment_classes is not None
     segments.append(
@@ -681,7 +754,9 @@ def write_run_summary_csv(
 ) -> Path:
     out_dir = Path(args.out_dir).expanduser().resolve()
     if not matches:
-        raise ValueError("Cannot write run summary because no input frames were selected")
+        raise ValueError(
+            "Cannot write run summary because no input frames were selected"
+        )
 
     filtered_presence = filter_image_class_presence(
         args,
@@ -696,9 +771,8 @@ def write_run_summary_csv(
     data_name = str(args.data_name).strip() if args.data_name is not None else ""
     if not data_name:
         data_name = "data_name"
-    class_tags = load_csv_class_tags(
-        getattr(args, "csv_tags_yaml", LEGACY_CSV_TAGS_CONFIG)
-    )
+    csv_tags_config = getattr(args, "csv_tags_yaml", LEGACY_CSV_TAGS_CONFIG)
+    class_tags = load_csv_class_tags(csv_tags_config) if csv_tags_config else {}
 
     summary_path = out_dir / "sam3_run_summary.csv"
     temporary_path = summary_path.with_suffix(summary_path.suffix + ".tmp")
@@ -738,7 +812,9 @@ def write_run_summary_csv(
 def summarize_class_presence(
     frame_class_presence: tuple[frozenset[str], ...] | list[set[str]],
 ) -> dict[str, dict[str, int]]:
-    labels = sorted({label for frame_classes in frame_class_presence for label in frame_classes})
+    labels = sorted(
+        {label for frame_classes in frame_class_presence for label in frame_classes}
+    )
     summary: dict[str, dict[str, int]] = {}
     for label in labels:
         frame_count = 0
@@ -761,7 +837,7 @@ def summarize_class_presence(
 def run_sam3(
     args: argparse.Namespace,
     *,
-    matches: list[MatchedFrame] | None,
+    matches: list[MatchedFrame],
 ) -> FolderDetectionSummary:
     return sam3_single_image_folder(
         image_dir=args.image_dir,
@@ -798,9 +874,7 @@ def run_sam3(
         inference_precision=args.inference_precision,
         cache_visual_features=args.cache_visual_features,
         save_outputs=args.save_intermediate_outputs,
-        frame_image_pairs=None
-        if matches is None
-        else [(match.frame_id, match.image_path) for match in matches],
+        frame_image_pairs=[(match.frame_id, match.image_path) for match in matches],
     )
 
 
@@ -841,8 +915,8 @@ def main(argv: list[str] | None = None) -> None:
 
     configure_gpu(args.gpu_id)
     matches = selected_frame_matches(args)
-    assert matches is not None
     processing_matches = deduplicate_matches_by_image(matches)
+    input_mode = "synchronized" if args.time_map is not None else "image_folder"
     if args.save_intermediate_outputs:
         prepare_csv_only_output(
             args.out_dir,
@@ -854,7 +928,9 @@ def main(argv: list[str] | None = None) -> None:
             {
                 "matched_frames": len(matches),
                 "unique_images": len(processing_matches),
-                "duplicate_image_matches_skipped": len(matches) - len(processing_matches),
+                "duplicate_image_matches_skipped": len(matches)
+                - len(processing_matches),
+                "input_mode": input_mode,
                 "first_frame": matches[0].frame_id,
                 "last_frame": matches[-1].frame_id,
                 "first_image": matches[0].image_name,

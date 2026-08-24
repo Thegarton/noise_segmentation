@@ -76,17 +76,45 @@ def test_short_cli_uses_production_defaults() -> None:
     assert args.sign_classifier_context_scale == 3.0
 
 
+def test_image_only_cli_needs_no_synchronization_arguments() -> None:
+    script = load_script()
+
+    args = script.build_parser().parse_args(
+        [
+            "--image-path",
+            "/data/images",
+            "--output-path",
+            "/output/run",
+            "--sensor-version",
+            "HL320",
+            "--data-name",
+            "validation-set",
+            "--gpu-num",
+            "0",
+        ]
+    )
+
+    assert args.time_map is None
+    assert args.img_match is None
+    assert args.start_frame is None
+    assert args.end_frame is None
+
+
 def test_sensor_version_defaults_to_hl320() -> None:
     script = load_script()
     sensor_action = next(
-        action for action in script.build_parser()._actions if action.dest == "sensor_version"
+        action
+        for action in script.build_parser()._actions
+        if action.dest == "sensor_version"
     )
 
     assert sensor_action.required is False
     assert sensor_action.default == "HL320"
 
 
-def test_sensor_config_paths_are_resolved_and_explicit_override_is_kept(tmp_path: Path) -> None:
+def test_sensor_config_paths_are_resolved_and_explicit_override_is_kept(
+    tmp_path: Path,
+) -> None:
     script = load_script()
     configs_root = tmp_path / "configs"
     sensor_dir = configs_root / "SENSOR_A"
@@ -107,10 +135,44 @@ def test_sensor_config_paths_are_resolved_and_explicit_override_is_kept(tmp_path
 
     assert Path(args.prompt_config) == explicit_prompts.resolve()
     assert Path(args.classes_yaml) == (sensor_dir / "classes_v2.yaml").resolve()
-    assert Path(args.label_min_scores) == (sensor_dir / "sam3_label_min_scores.yaml").resolve()
-    assert Path(args.csv_tags_yaml) == (
-        sensor_dir / "sam3_csv_class_tags_zh_en.yaml"
-    ).resolve()
+    assert (
+        Path(args.label_min_scores)
+        == (sensor_dir / "sam3_label_min_scores.yaml").resolve()
+    )
+    assert (
+        Path(args.csv_tags_yaml)
+        == (sensor_dir / "sam3_csv_class_tags_zh_en.yaml").resolve()
+    )
+
+
+def test_sensor_config_needs_only_classes_and_prompts(tmp_path: Path) -> None:
+    script = load_script()
+    sensor_dir = tmp_path / "configs" / "IMAGE_ONLY"
+    sensor_dir.mkdir(parents=True)
+    (sensor_dir / "sam3_text_prompts_v2.yaml").write_text(
+        "traffic_cone:\n  - traffic cone\n",
+        encoding="utf-8",
+    )
+    (sensor_dir / "classes_v2.yaml").write_text(
+        "semantic_classes:\n  traffic_cone: 1\n",
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        sensor_version="IMAGE_ONLY",
+        prompt_config=None,
+        classes_yaml=None,
+        label_min_scores=None,
+        csv_tags_yaml=None,
+    )
+
+    script.resolve_sensor_config_paths(args, configs_root=tmp_path / "configs")
+
+    assert (
+        Path(args.prompt_config) == (sensor_dir / "sam3_text_prompts_v2.yaml").resolve()
+    )
+    assert Path(args.classes_yaml) == (sensor_dir / "classes_v2.yaml").resolve()
+    assert args.label_min_scores is None
+    assert args.csv_tags_yaml is None
 
 
 def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
@@ -126,14 +188,12 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
 
     time_map = tmp_path / "imgTimeMap.txt"
     time_map.write_text(
-        "000101>>1000>>1000>>1000\n"
-        "000102>>2000>>2000>>2000\n",
+        "000101>>1000>>1000>>1000\n000102>>2000>>2000>>2000\n",
         encoding="utf-8",
     )
     match_map = tmp_path / "imgMatch.txt"
     match_map.write_text(
-        "000101>>000010>>0\n"
-        "000102>>000011>>0\n",
+        "000101>>000010>>0\n000102>>000011>>0\n",
         encoding="utf-8",
     )
 
@@ -150,7 +210,9 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
             ),
         )
 
-    monkeypatch.setattr(script, "sam3_single_image_folder", fake_sam3_single_image_folder)
+    monkeypatch.setattr(
+        script, "sam3_single_image_folder", fake_sam3_single_image_folder
+    )
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     script.main(
         [
@@ -195,7 +257,9 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
         ("000102", (image_dir / "000011.jpg").resolve()),
     ]
     assert [path.name for path in output_dir.iterdir()] == ["sam3_run_summary.csv"]
-    with (output_dir / "sam3_run_summary.csv").open(encoding="utf-8", newline="") as stream:
+    with (output_dir / "sam3_run_summary.csv").open(
+        encoding="utf-8", newline=""
+    ) as stream:
         rows = list(csv.DictReader(stream))
     assert len(rows) == 2
     assert rows[0]["tags"] == "锥桶(traffic_cone)"
@@ -208,7 +272,69 @@ def test_main_short_cli_writes_only_csv(tmp_path: Path, monkeypatch) -> None:
     assert rows[1]["frame_num"] == "1"
 
 
-def test_intermediate_output_flag_is_forwarded_to_sam3(tmp_path: Path, monkeypatch) -> None:
+def test_main_image_only_cli_processes_every_image(tmp_path: Path, monkeypatch) -> None:
+    script = load_script()
+    image_dir = tmp_path / "images"
+    output_dir = tmp_path / "output"
+    image_dir.mkdir()
+    for image_name in ("camera-left", "camera-right"):
+        (image_dir / f"{image_name}.jpg").write_bytes(b"image")
+
+    captured: dict[str, object] = {}
+
+    def fake_sam3_single_image_folder(**kwargs):
+        captured.update(kwargs)
+        return script.FolderDetectionSummary(
+            detected_classes=frozenset({"traffic_cone"}),
+            frame_ids=("camera-left", "camera-right"),
+            frame_class_presence=(
+                frozenset({"traffic_cone"}),
+                frozenset({"traffic_cone"}),
+            ),
+        )
+
+    monkeypatch.setattr(
+        script, "sam3_single_image_folder", fake_sam3_single_image_folder
+    )
+    script.main(
+        [
+            "--image-path",
+            str(image_dir),
+            "--output-path",
+            str(output_dir),
+            "--sensor-version",
+            "HL320",
+            "--data-name",
+            "validation-set",
+            "--gpu-num",
+            "0",
+        ]
+    )
+
+    assert captured["frame_image_pairs"] == [
+        ("camera-left", (image_dir / "camera-left.jpg").resolve()),
+        ("camera-right", (image_dir / "camera-right.jpg").resolve()),
+    ]
+    with (output_dir / "sam3_run_summary.csv").open(
+        encoding="utf-8", newline=""
+    ) as stream:
+        rows = list(csv.DictReader(stream))
+    assert [row["start_frame"] for row in rows] == [
+        "camera-left",
+        "camera-right",
+    ]
+    assert [row["end_frame"] for row in rows] == [
+        "camera-left",
+        "camera-right",
+    ]
+    assert all(row["start_timestamp"] == "" for row in rows)
+    assert all(row["end_timestamp"] == "" for row in rows)
+    assert all(row["frame_num"] == "1" for row in rows)
+
+
+def test_intermediate_output_flag_is_forwarded_to_sam3(
+    tmp_path: Path, monkeypatch
+) -> None:
     script = load_script()
     image_dir = tmp_path / "images"
     output_dir = tmp_path / "output"
@@ -232,7 +358,9 @@ def test_intermediate_output_flag_is_forwarded_to_sam3(tmp_path: Path, monkeypat
             frame_class_presence=(frozenset(),),
         )
 
-    monkeypatch.setattr(script, "sam3_single_image_folder", fake_sam3_single_image_folder)
+    monkeypatch.setattr(
+        script, "sam3_single_image_folder", fake_sam3_single_image_folder
+    )
     script.main(
         [
             "--image-path",
@@ -300,7 +428,9 @@ def test_sensor_csv_tags_map_sign_classifier_output() -> None:
     )
 
 
-def test_load_matched_frames_selects_minimum_absolute_diff_for_each_frame(tmp_path: Path) -> None:
+def test_load_matched_frames_selects_minimum_absolute_diff_for_each_frame(
+    tmp_path: Path,
+) -> None:
     script = load_script()
     image_dir = tmp_path / "images"
     image_dir.mkdir()
@@ -319,8 +449,20 @@ def test_load_matched_frames_selects_minimum_absolute_diff_for_each_frame(tmp_pa
         encoding="utf-8",
     )
     image_names = {
-        "000232", "000233", "000234", "000237", "000238", "000239", "000240",
-        "000241", "000245", "000246", "000247", "000250", "000251", "000252",
+        "000232",
+        "000233",
+        "000234",
+        "000237",
+        "000238",
+        "000239",
+        "000240",
+        "000241",
+        "000245",
+        "000246",
+        "000247",
+        "000250",
+        "000251",
+        "000252",
     }
     for image_name in image_names:
         (image_dir / f"{image_name}.jpg").write_bytes(b"image")
@@ -353,7 +495,12 @@ def test_load_matched_frames_selects_minimum_absolute_diff_for_each_frame(tmp_pa
     )
 
     assert len(matches) == 4
-    assert [item.frame_id for item in matches] == ["000001", "000002", "000003", "000004"]
+    assert [item.frame_id for item in matches] == [
+        "000001",
+        "000002",
+        "000003",
+        "000004",
+    ]
     assert matches[0].frame_id == "000001"
     assert matches[0].image_name == "000233"
     assert matches[0].diff_ms == -44.0
@@ -447,7 +594,9 @@ def test_write_run_summary_csv_collects_classes_and_timestamps(tmp_path: Path) -
     ]
 
 
-def test_write_run_summary_csv_filters_by_count_and_consecutive_frames(tmp_path: Path) -> None:
+def test_write_run_summary_csv_filters_by_count_and_consecutive_frames(
+    tmp_path: Path,
+) -> None:
     script = load_script()
     args = argparse.Namespace(
         out_dir=str(tmp_path),
@@ -680,7 +829,9 @@ def load_script():
     script_path = scripts_dir / "run_full_sam3_masking.py"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
-    spec = importlib.util.spec_from_file_location("run_full_sam3_masking_test", script_path)
+    spec = importlib.util.spec_from_file_location(
+        "run_full_sam3_masking_test", script_path
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

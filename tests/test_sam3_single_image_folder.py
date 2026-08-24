@@ -22,6 +22,20 @@ def test_collect_images_non_recursive_sorted(tmp_path: Path):
     assert [path.name for path in images] == ["a.jpg", "b.png"]
 
 
+def test_find_project_root_supports_both_package_layouts(tmp_path: Path):
+    script = load_script()
+    project_root = tmp_path / "pipeline_v0"
+    autolabeler = project_root / "src" / "autolabeler"
+    autolabeler.mkdir(parents=True)
+    direct_layout = autolabeler / "sam3_single_image" / "postprocess.py"
+    teachers_layout = (
+        autolabeler / "teachers" / "sam3_single_image" / "postprocess.py"
+    )
+
+    assert script.find_project_root(direct_layout) == project_root.resolve()
+    assert script.find_project_root(teachers_layout) == project_root.resolve()
+
+
 def test_classes_from_semantic_mask_does_not_require_json_logs(tmp_path: Path):
     script = load_script()
     semantic = np.asarray([[0, 2, 2], [5, 5, 5]], dtype=np.uint16)
